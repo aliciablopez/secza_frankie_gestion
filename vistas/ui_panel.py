@@ -13,46 +13,30 @@ from tkinter import messagebox, ttk
 from controladores.controlador_core import ControladorCore
 from vistas.estilos import COLOR_TEXTO, FUENTE_BASE, aplicar_estilos_base
 
-# Importaciones seguras de las vistas modulares del sistema
 try:
     from vistas.ui_empleados import InterfazEmpleados
 except ImportError:
-    try:
-        from src.vistas.ui_empleados import InterfazEmpleados
-    except ImportError:
-        InterfazEmpleados = None
+    InterfazEmpleados = None
 
 try:
     from vistas.ui_proveedores import InterfazProveedores
 except ImportError:
-    try:
-        from src.vistas.ui_proveedores import InterfazProveedores
-    except ImportError:
-        InterfazProveedores = None
+    InterfazProveedores = None
 
 try:
     from vistas.ui_inventario import InterfazInventario
 except ImportError:
-    try:
-        from src.vistas.ui_inventario import InterfazInventario
-    except ImportError:
-        InterfazInventario = None
+    InterfazInventario = None
 
 try:
     from vistas.ui_haberes import InterfazHaberes
 except ImportError:
-    try:
-        from src.vistas.ui_haberes import InterfazHaberes
-    except ImportError:
-        InterfazHaberes = None
+    InterfazHaberes = None
 
 try:
     from vistas.ui_clientes import InterfazClientes
 except ImportError:
-    try:
-        from src.vistas.ui_clientes import InterfazClientes
-    except ImportError:
-        InterfazClientes = None
+    InterfazClientes = None
 
 
 class PanelPrincipal:
@@ -65,12 +49,12 @@ class PanelPrincipal:
         root: tk.Misc,
         usuario_actual: Any,
         on_cerrar_sesion: Optional[Callable[[], None]] = None,
-        orquestador: Optional[ControladorCore] = None,
+        controlador: Optional[ControladorCore] = None,
     ) -> None:
         self.root = root
         self.usuario_actual = usuario_actual
         self.on_cerrar_sesion = on_cerrar_sesion
-        self.orquestador = orquestador if orquestador is not None else ControladorCore()
+        self.controlador = controlador if controlador is not None else ControladorCore()
 
         aplicar_estilos_base(self.root)
 
@@ -123,7 +107,6 @@ class PanelPrincipal:
 
         es_admin = "Administrador" in nombres_roles
 
-        # Botones de Navegación Modular (12 pt sin negrita desde estilos.py)
         btn_rrhh = ttk.Button(
             self.frame_menu,
             text="👥 Padrón Empleados",
@@ -161,7 +144,6 @@ class PanelPrincipal:
 
         ttk.Separator(self.frame_menu, orient="horizontal").pack(fill="x", pady=12)
 
-        # Cerrar Sesión antes de Backup Sistema
         btn_salir = ttk.Button(
             self.frame_menu,
             text="🚪 Cerrar Sesión",
@@ -278,7 +260,7 @@ class PanelPrincipal:
     def ejecutar_backup(self) -> None:
         """Solicita al controlador core la generación de un respaldo del sistema."""
         try:
-            resultado = self.orquestador.ejecutar_backup()
+            resultado = self.controlador.ejecutar_backup()
         except Exception as exc:
             messagebox.showerror(
                 "Error de Backup",

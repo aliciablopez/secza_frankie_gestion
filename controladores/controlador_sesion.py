@@ -54,6 +54,9 @@ class ControladorSesion:
 
         if isinstance(self.root, (tk.Tk, tk.Toplevel)):
             self.root.resizable(True, True)
+            self.root.columnconfigure(0, weight=0)
+            self.root.columnconfigure(1, weight=1)
+            self.root.rowconfigure(0, weight=1)
 
         PanelPrincipal(
             self.root,

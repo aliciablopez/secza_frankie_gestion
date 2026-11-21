@@ -9,7 +9,7 @@ from infraestructura.conexion import ConexionDB
 logger = logging.getLogger(__name__)
 
 
-class OrquestadorCore:
+class ControladorCore:
     """
     Controlador del Módulo Core.
     Aplica las reglas de negocio y orquesta las acciones entre la Interfaz y la Infraestructura.
@@ -59,6 +59,3 @@ class OrquestadorCore:
                 ruta_db_destino.unlink(missing_ok=True)
             logger.exception("Error crítico al generar backup")
             return f"Error crítico al generar backup: {exc}"
-
-
-ControladorCore = OrquestadorCore
