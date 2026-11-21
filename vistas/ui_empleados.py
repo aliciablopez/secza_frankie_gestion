@@ -8,6 +8,7 @@ Sincronizado con CARGOS, SECTORES y TIPOS_VINCULO de dominio/entidades_rrhh.py.
 """
 
 import tkinter as tk
+from tkinter import font as tkfont
 from tkinter import messagebox, ttk
 from typing import Dict, Optional
 
@@ -21,6 +22,10 @@ except ImportError:
         from vistas.estilos import aplicar_estilos_base
     except ImportError:
         aplicar_estilos_base = None
+
+
+TAMANIO_FUENTE = 12
+ALTO_FILA_TABLA = 34
 
 
 def _cargo_por_defecto() -> str:
@@ -57,21 +62,20 @@ class InterfazEmpleados(ttk.Frame):
 
         self.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # Estado de selección y caché local para edición rápida
         self.empleado_seleccionado_id: Optional[int] = None
         self.persona_seleccionada_id: Optional[int] = None
         self.empleado_estado_activo: bool = True
         self.empleados_cache: Dict[str, Empleado] = {}
 
-        # Variables de control del formulario (terna homogénea por defecto)
-        self.var_legajo = tk.StringVar()
+        # Variables de control del formulario (2 columnas x 5 filas de datos)
         self.var_documento = tk.StringVar()
+        self.var_legajo = tk.StringVar()
         self.var_nombres = tk.StringVar()
         self.var_apellidos = tk.StringVar()
         self.var_cargo = tk.StringVar(value=_cargo_por_defecto())
         self.var_sector = tk.StringVar(value=_sector_por_defecto())
         self.var_vinculo = tk.StringVar(value=_vinculo_por_defecto())
-        self.var_sueldo = tk.StringVar()
+        self.var_direccion = tk.StringVar()
         self.var_email = tk.StringVar()
         self.var_telefono = tk.StringVar()
 
@@ -79,97 +83,141 @@ class InterfazEmpleados(ttk.Frame):
         self.var_mostrar_inactivos = tk.BooleanVar(value=False)
 
         self._construir_interfaz()
+        self._configurar_fuentes_y_estilos()
         self.sugerir_legajo()
         self.cargar_tabla_empleados()
 
+    def _configurar_fuentes_y_estilos(self):
+        """Aplica 12 pt en general y negrita en encabezados para destacarlos."""
+        base_font = tkfont.nametofont("TkDefaultFont")
+        familia = base_font.actual().get("family") or "TkDefaultFont"
+
+        fuente_normal = (familia, TAMANIO_FUENTE, "normal")
+        fuente_encabezado = (familia, TAMANIO_FUENTE, "bold")
+
+        for nombre_fuente in (
+            "TkDefaultFont",
+            "TkTextFont",
+            "TkMenuFont",
+            "TkHeadingFont",
+        ):
+            try:
+                f = tkfont.nametofont(nombre_fuente)
+                f.configure(
+                    family=familia,
+                    size=TAMANIO_FUENTE,
+                    weight="bold" if nombre_fuente == "TkHeadingFont" else "normal",
+                    slant="roman",
+                )
+            except Exception:
+                pass
+
+        estilo = ttk.Style()
+        estilo.configure("TLabel", font=fuente_normal)
+        estilo.configure("TButton", font=fuente_normal)
+        estilo.configure("TCheckbutton", font=fuente_normal)
+        estilo.configure("TEntry", font=fuente_normal)
+        estilo.configure("TCombobox", font=fuente_normal)
+        estilo.configure("TLabelframe.Label", font=fuente_encabezado)
+        estilo.configure(
+            "Treeview",
+            font=fuente_normal,
+            rowheight=ALTO_FILA_TABLA,
+        )
+        estilo.configure(
+            "Treeview.Heading",
+            font=fuente_encabezado,
+        )
+        self.option_add("*TCombobox*Listbox.font", fuente_normal)
+
     def _construir_interfaz(self):
-        # 1. Formulario de Datos
+        # 1. Formulario de Datos (2 columnas x 5 filas)
         frame_form = ttk.LabelFrame(self, text=" Datos del Empleado ", padding=15)
         frame_form.pack(fill="x", padx=5, pady=5)
         frame_form.columnconfigure(1, weight=1)
         frame_form.columnconfigure(3, weight=1)
 
-        # Fila 0: Legajo y CUIL
-        ttk.Label(frame_form, text="Legajo:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        # Fila 0: CUIL (izquierda) y Legajo (derecha)
+        ttk.Label(frame_form, text="CUIL (11 dígitos) *:").grid(
+            row=0, column=0, sticky="w", padx=6, pady=6
+        )
+        ttk.Entry(frame_form, textvariable=self.var_documento, width=22).grid(
+            row=0, column=1, sticky="ew", padx=6, pady=6
+        )
+
+        ttk.Label(frame_form, text="Legajo:").grid(row=0, column=2, sticky="w", padx=6, pady=6)
         entry_legajo = ttk.Entry(
             frame_form, textvariable=self.var_legajo, width=15, state="readonly"
         )
-        entry_legajo.grid(row=0, column=1, sticky="w", padx=5, pady=5)
-
-        ttk.Label(frame_form, text="CUIL (11 dígitos) *:").grid(
-            row=0, column=2, sticky="w", padx=5, pady=5
-        )
-        ttk.Entry(frame_form, textvariable=self.var_documento, width=22).grid(
-            row=0, column=3, sticky="w", padx=5, pady=5
-        )
+        entry_legajo.grid(row=0, column=3, sticky="w", padx=6, pady=6)
 
         # Fila 1: Nombres y Apellidos
-        ttk.Label(frame_form, text="Nombres *:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        ttk.Label(frame_form, text="Nombres *:").grid(row=1, column=0, sticky="w", padx=6, pady=6)
         ttk.Entry(frame_form, textvariable=self.var_nombres, width=25).grid(
-            row=1, column=1, sticky="ew", padx=5, pady=5
+            row=1, column=1, sticky="ew", padx=6, pady=6
         )
 
         ttk.Label(frame_form, text="Apellidos *:").grid(
-            row=1, column=2, sticky="w", padx=5, pady=5
+            row=1, column=2, sticky="w", padx=6, pady=6
         )
         ttk.Entry(frame_form, textvariable=self.var_apellidos, width=25).grid(
-            row=1, column=3, sticky="ew", padx=5, pady=5
+            row=1, column=3, sticky="ew", padx=6, pady=6
         )
 
         # Fila 2: Cargo y Sector
-        ttk.Label(frame_form, text="Cargo *:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
+        ttk.Label(frame_form, text="Cargo *:").grid(row=2, column=0, sticky="w", padx=6, pady=6)
         self.combo_cargo = ttk.Combobox(
             frame_form,
             textvariable=self.var_cargo,
             state="readonly",
-            values=CARGOS,
+            values=tuple(CARGOS),
         )
-        self.combo_cargo.grid(row=2, column=1, sticky="ew", padx=5, pady=5)
+        self.combo_cargo.grid(row=2, column=1, sticky="ew", padx=6, pady=6)
 
-        ttk.Label(frame_form, text="Sector *:").grid(row=2, column=2, sticky="w", padx=5, pady=5)
+        ttk.Label(frame_form, text="Sector *:").grid(row=2, column=2, sticky="w", padx=6, pady=6)
         self.combo_sector = ttk.Combobox(
             frame_form,
             textvariable=self.var_sector,
             state="readonly",
-            values=SECTORES,
+            values=tuple(SECTORES),
         )
-        self.combo_sector.grid(row=2, column=3, sticky="ew", padx=5, pady=5)
+        self.combo_sector.grid(row=2, column=3, sticky="ew", padx=6, pady=6)
 
-        # Fila 3: Vínculo y Sueldo
-        ttk.Label(frame_form, text="Vínculo *:").grid(row=3, column=0, sticky="w", padx=5, pady=5)
+        # Fila 3: Vínculo y Dirección
+        ttk.Label(frame_form, text="Vínculo *:").grid(row=3, column=0, sticky="w", padx=6, pady=6)
         self.combo_vinculo = ttk.Combobox(
             frame_form,
             textvariable=self.var_vinculo,
             state="readonly",
-            values=TIPOS_VINCULO,
+            values=tuple(TIPOS_VINCULO),
         )
-        self.combo_vinculo.grid(row=3, column=1, sticky="ew", padx=5, pady=5)
+        self.combo_vinculo.grid(row=3, column=1, sticky="ew", padx=6, pady=6)
 
-        ttk.Label(frame_form, text="Sueldo Base ($) *:").grid(
-            row=3, column=2, sticky="w", padx=5, pady=5
+        ttk.Label(frame_form, text="Dirección:").grid(
+            row=3, column=2, sticky="w", padx=6, pady=6
         )
-        ttk.Entry(frame_form, textvariable=self.var_sueldo, width=22).grid(
-            row=3, column=3, sticky="w", padx=5, pady=5
+        ttk.Entry(frame_form, textvariable=self.var_direccion, width=25).grid(
+            row=3, column=3, sticky="ew", padx=6, pady=6
         )
 
         # Fila 4: Contacto
-        ttk.Label(frame_form, text="Email *:").grid(row=4, column=0, sticky="w", padx=5, pady=5)
+        ttk.Label(frame_form, text="Email *:").grid(row=4, column=0, sticky="w", padx=6, pady=6)
         ttk.Entry(frame_form, textvariable=self.var_email, width=25).grid(
-            row=4, column=1, sticky="ew", padx=5, pady=5
+            row=4, column=1, sticky="ew", padx=6, pady=6
         )
 
-        ttk.Label(frame_form, text="Teléfono:").grid(row=4, column=2, sticky="w", padx=5, pady=5)
+        ttk.Label(frame_form, text="Teléfono:").grid(row=4, column=2, sticky="w", padx=6, pady=6)
         ttk.Entry(frame_form, textvariable=self.var_telefono, width=22).grid(
-            row=4, column=3, sticky="w", padx=5, pady=5
+            row=4, column=3, sticky="ew", padx=6, pady=6
         )
 
         # Botonera del Formulario
         frame_botones = ttk.Frame(frame_form)
-        frame_botones.grid(row=5, column=0, columnspan=4, sticky="e", pady=10)
+        frame_botones.grid(row=5, column=0, columnspan=4, sticky="e", pady=(10, 4))
 
         ttk.Button(
             frame_botones, text="Limpiar / Nuevo", command=self.limpiar_formulario
-        ).pack(side="left", padx=5)
+        ).pack(side="left", padx=6)
 
         self.btn_toggle_estado = ttk.Button(
             frame_botones,
@@ -177,12 +225,12 @@ class InterfazEmpleados(ttk.Frame):
             command=self.toggle_estado_empleado,
             state="disabled",
         )
-        self.btn_toggle_estado.pack(side="left", padx=5)
+        self.btn_toggle_estado.pack(side="left", padx=6)
 
         self.btn_guardar = ttk.Button(
             frame_botones, text="Guardar Empleado", command=self.guardar_empleado
         )
-        self.btn_guardar.pack(side="left", padx=5)
+        self.btn_guardar.pack(side="left", padx=6)
 
         # 2. Sección de Listado (Tabla Treeview)
         frame_tabla = ttk.LabelFrame(
@@ -192,11 +240,10 @@ class InterfazEmpleados(ttk.Frame):
         )
         frame_tabla.pack(fill="both", expand=True, padx=5, pady=5)
 
-        # Filtro de Búsqueda
         frame_busqueda = ttk.Frame(frame_tabla)
         frame_busqueda.pack(fill="x", pady=(0, 8))
 
-        ttk.Label(frame_busqueda, text="Buscar empleado:").pack(side="left", padx=(0, 5))
+        ttk.Label(frame_busqueda, text="Buscar empleado:").pack(side="left", padx=(0, 6))
         entry_buscar = ttk.Entry(frame_busqueda, textvariable=self.var_busqueda)
         entry_buscar.pack(side="left", fill="x", expand=True, padx=(0, 10))
         entry_buscar.bind("<KeyRelease>", lambda _e: self.cargar_tabla_empleados())
@@ -209,11 +256,12 @@ class InterfazEmpleados(ttk.Frame):
         )
         chk_inactivos.pack(side="right")
 
-        # Contenedor exclusivo de Tabla + Barras de Desplazamiento
         frame_grilla = ttk.Frame(frame_tabla)
         frame_grilla.pack(fill="both", expand=True)
         frame_grilla.rowconfigure(0, weight=1)
+        frame_grilla.rowconfigure(1, weight=0)
         frame_grilla.columnconfigure(0, weight=1)
+        frame_grilla.columnconfigure(1, weight=0)
 
         columnas = (
             "id",
@@ -223,7 +271,7 @@ class InterfazEmpleados(ttk.Frame):
             "cargo",
             "sector",
             "vinculo",
-            "sueldo",
+            "direccion",
             "email",
             "telefono",
             "estado",
@@ -237,22 +285,22 @@ class InterfazEmpleados(ttk.Frame):
         self.tabla.heading("cargo", text="Cargo")
         self.tabla.heading("sector", text="Sector")
         self.tabla.heading("vinculo", text="Vínculo")
-        self.tabla.heading("sueldo", text="Sueldo Base")
+        self.tabla.heading("direccion", text="Dirección")
         self.tabla.heading("email", text="Email")
         self.tabla.heading("telefono", text="Teléfono")
         self.tabla.heading("estado", text="Estado")
 
-        self.tabla.column("id", width=35, anchor="center")
-        self.tabla.column("legajo", width=70, anchor="center")
-        self.tabla.column("nombre", width=140, anchor="w")
-        self.tabla.column("documento", width=105, anchor="center")
-        self.tabla.column("cargo", width=105, anchor="w")
-        self.tabla.column("sector", width=95, anchor="w")
-        self.tabla.column("vinculo", width=95, anchor="w")
-        self.tabla.column("sueldo", width=85, anchor="e")
-        self.tabla.column("email", width=130, anchor="w")
-        self.tabla.column("telefono", width=90, anchor="center")
-        self.tabla.column("estado", width=65, anchor="center")
+        self.tabla.column("id", width=60, minwidth=50, anchor="center", stretch=False)
+        self.tabla.column("legajo", width=105, minwidth=90, anchor="center", stretch=False)
+        self.tabla.column("nombre", width=220, minwidth=180, anchor="w", stretch=True)
+        self.tabla.column("documento", width=160, minwidth=140, anchor="center", stretch=False)
+        self.tabla.column("cargo", width=160, minwidth=135, anchor="w", stretch=False)
+        self.tabla.column("sector", width=140, minwidth=120, anchor="w", stretch=False)
+        self.tabla.column("vinculo", width=140, minwidth=120, anchor="w", stretch=False)
+        self.tabla.column("direccion", width=210, minwidth=170, anchor="w", stretch=True)
+        self.tabla.column("email", width=210, minwidth=170, anchor="w", stretch=True)
+        self.tabla.column("telefono", width=150, minwidth=130, anchor="center", stretch=False)
+        self.tabla.column("estado", width=105, minwidth=90, anchor="center", stretch=False)
 
         scroll_y = ttk.Scrollbar(frame_grilla, orient="vertical", command=self.tabla.yview)
         scroll_x = ttk.Scrollbar(frame_grilla, orient="horizontal", command=self.tabla.xview)
@@ -290,6 +338,7 @@ class InterfazEmpleados(ttk.Frame):
                     self.empleados_cache[str(emp.id_empleado)] = emp
                 estado_str = "Activo" if getattr(emp, "activo", True) else "Inactivo"
                 vinculo_str = getattr(emp, "tipo_vinculo", "Contratado") or "Contratado"
+                direccion_str = getattr(emp, "domicilio", "") or "-"
                 self.tabla.insert(
                     "",
                     "end",
@@ -301,7 +350,7 @@ class InterfazEmpleados(ttk.Frame):
                         emp.cargo,
                         emp.sector,
                         vinculo_str,
-                        f"$ {emp.sueldo:,.2f}" if emp.sueldo else "$ 0.00",
+                        direccion_str,
                         emp.email or "-",
                         emp.telefono or "-",
                         estado_str,
@@ -322,11 +371,11 @@ class InterfazEmpleados(ttk.Frame):
         cargo = self.var_cargo.get().strip()
         sector = self.var_sector.get().strip()
         vinculo = self.var_vinculo.get().strip()
-        sueldo_txt = self.var_sueldo.get().strip().replace(",", ".")
+        direccion = self.var_direccion.get().strip()
         email = self.var_email.get().strip()
         telefono = self.var_telefono.get().strip()
 
-        if not all([doc, nombres, apellidos, cargo, sector, vinculo, sueldo_txt, email]):
+        if not all([doc, nombres, apellidos, cargo, sector, vinculo, email]):
             messagebox.showwarning(
                 "Campos Incompletos",
                 "Por favor, complete todos los campos obligatorios marcados con (*).",
@@ -338,24 +387,6 @@ class InterfazEmpleados(ttk.Frame):
             messagebox.showwarning(
                 "CUIL Inválido",
                 "El CUIL del empleado debe tener exactamente 11 dígitos numéricos.",
-                parent=self,
-            )
-            return
-
-        try:
-            sueldo = float(sueldo_txt)
-        except ValueError:
-            messagebox.showerror(
-                "Error de Formato",
-                "El sueldo base debe ser un valor numérico.",
-                parent=self,
-            )
-            return
-
-        if sueldo < 0:
-            messagebox.showwarning(
-                "Valor Inválido",
-                "El sueldo base no puede ser negativo.",
                 parent=self,
             )
             return
@@ -373,7 +404,7 @@ class InterfazEmpleados(ttk.Frame):
             cargo=cargo,
             sector=sector,
             tipo_vinculo=vinculo,
-            sueldo=sueldo,
+            domicilio=direccion,
             email=email,
             telefono=telefono,
             activo=self.empleado_estado_activo,
@@ -455,7 +486,7 @@ class InterfazEmpleados(ttk.Frame):
         self.var_documento.set("")
         self.var_nombres.set("")
         self.var_apellidos.set("")
-        self.var_sueldo.set("")
+        self.var_direccion.set("")
         self.var_email.set("")
         self.var_telefono.set("")
         self.var_cargo.set(_cargo_por_defecto())
@@ -494,7 +525,7 @@ class InterfazEmpleados(ttk.Frame):
         self.var_vinculo.set(
             getattr(emp, "tipo_vinculo", _vinculo_por_defecto()) or _vinculo_por_defecto()
         )
-        self.var_sueldo.set(str(emp.sueldo if emp.sueldo is not None else ""))
+        self.var_direccion.set(getattr(emp, "domicilio", "") or "")
         self.var_email.set(emp.email or "")
         self.var_telefono.set(emp.telefono or "")
 
@@ -508,6 +539,6 @@ class InterfazEmpleados(ttk.Frame):
 if __name__ == "__main__":
     root = tk.Tk()
     root.title("Frankie Gestor - Padrón de Empleados")
-    root.geometry("1050x680")
+    root.geometry("1180x740")
     InterfazEmpleados(root)
     root.mainloop()

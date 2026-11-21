@@ -2,545 +2,566 @@
 ===============================================================================
 MÓDULO DE INTERFAZ DE USUARIO: LIQUIDACIÓN DE HABERES (vistas/ui_haberes.py)
 ===============================================================================
-Calcula haberes remunerativos, deducciones de ley, persiste la liquidación
-en SQLite y permite previsualizar y emitir el recibo oficial de sueldo.
+Calcula haberes remunerativos y no remunerativos, deducciones de ley,
+persiste la liquidación en SQLite y permite previsualizar y exportar el recibo
+HTML dentro de comprobantes/recibo_haberes/ en la raíz del proyecto.
 ===============================================================================
 """
 
 from datetime import datetime
 from pathlib import Path
+import re
+import sqlite3
 import tkinter as tk
 from tkinter import messagebox, ttk
-from typing import Any, Callable, Dict, List, Optional
-import webbrowser
+from typing import Any, Dict, List, Optional
 
 from dominio.entidades_rrhh import Empleado
 from infraestructura.repo_haberes import RepositorioHaberes
 from infraestructura.repo_rrhh import RepositorioRRHH
 
 try:
-    import config as _config
+    from config import DIR_RECIBOS_HABERES as _DIR_RECIBOS_CFG
 except ImportError:
-    _config = None
-
-COLOR_TEXTO_MUTED: str = "#6c757d"
-aplicar_estilos_base: Optional[Callable[[Any], Any]] = None
+    _DIR_RECIBOS_CFG = None
 
 try:
-    from vistas.estilos import COLOR_TEXTO_MUTED as _color_texto_muted
-    from vistas.estilos import aplicar_estilos_base as _aplicar_estilos_base
-
-    COLOR_TEXTO_MUTED = _color_texto_muted
-    if callable(_aplicar_estilos_base):
-        aplicar_estilos_base = _aplicar_estilos_base
+    from vistas.ui_estilos import aplicar_estilos_base
 except ImportError:
-    _color_texto_muted = COLOR_TEXTO_MUTED
-    _aplicar_estilos_base = None
+    try:
+        from vistas.estilos import aplicar_estilos_base
+    except ImportError:
+        aplicar_estilos_base = None
 
 
-def _porc_cfg(attr_sistema: str, constante_mod: str, defecto: float) -> float:
-    """Obtiene un porcentaje decimal desde config.py o usa su valor por defecto."""
-    if _config is not None:
-        cfg_obj = getattr(_config, "CONFIG_SISTEMA", None)
-        if cfg_obj is not None and hasattr(cfg_obj, attr_sistema):
-            return float(getattr(cfg_obj, attr_sistema))
-        if hasattr(_config, constante_mod):
-            return float(getattr(_config, constante_mod))
-    return float(defecto)
+_EXCEPCIONES_OPERACION = (
+    sqlite3.Error,
+    ValueError,
+    TypeError,
+    KeyError,
+    RuntimeError,
+    OSError,
+)
+_EXCEPCIONES_UI = (
+    sqlite3.Error,
+    ValueError,
+    TypeError,
+    KeyError,
+    RuntimeError,
+    tk.TclError,
+    OSError,
+)
 
 
-def _fmt_pct(valor_decimal: float) -> str:
-    """Formatea un porcentaje decimal (ej. 0.025 -> '2,5%' o 0.11 -> '11%')."""
-    pct = round(valor_decimal * 100.0, 2)
-    texto = f"{pct:g}".replace(".", ",")
-    return f"{texto}%"
+def _obtener_carpeta_recibos_haberes() -> Path:
+    """Resuelve siempre comprobantes/recibo_haberes dentro de la raíz del proyecto."""
+    raiz_proyecto = Path(__file__).resolve().parent.parent
+    if _DIR_RECIBOS_CFG:
+        ruta = Path(_DIR_RECIBOS_CFG)
+        carpeta = ruta if ruta.is_absolute() else (raiz_proyecto / ruta)
+    else:
+        carpeta = raiz_proyecto / "comprobantes" / "recibo_haberes"
+    carpeta.mkdir(parents=True, exist_ok=True)
+    return carpeta
+
+
+def _sanitizar_segmento(valor: str, respaldo: str) -> str:
+    """Limpia caracteres especiales para formar un nombre de archivo seguro."""
+    limpio = re.sub(r"[^A-Za-z0-9_-]+", "_", (valor or "").strip()).strip("_")
+    return limpio or respaldo
+
+
+def obtener_ruta_recibo_html(legajo: str, periodo: str) -> Path:
+    """Devuelve la ruta completa del archivo HTML dentro de comprobantes/recibo_haberes."""
+    carpeta_recibos = _obtener_carpeta_recibos_haberes()
+    legajo_limpio = _sanitizar_segmento(legajo, "SIN_LEGAJO")
+    periodo_limpio = _sanitizar_segmento(periodo, "SIN_PERIODO")
+    return carpeta_recibos / f"Recibo_{legajo_limpio}_{periodo_limpio}.html"
 
 
 class InterfazHaberes(ttk.Frame):
     """Componente visual modular basado en ttk.Frame para la Liquidación de Haberes."""
 
-    def __init__(self, parent: tk.Widget, *args, **kwargs):
-        super().__init__(parent, *args, **kwargs)
-        if aplicar_estilos_base is not None:
+    def __init__(self, parent: tk.Misc) -> None:
+        super().__init__(parent)
+        if callable(aplicar_estilos_base):
             try:
                 aplicar_estilos_base(self)
-            except Exception:
+            except _EXCEPCIONES_UI:
                 pass
 
-        self.empleados_lista: List[Empleado] = []
+        self.empleados_por_etiqueta: Dict[str, Empleado] = {}
+        self.empleado_actual: Optional[Empleado] = None
         self.ultima_liquidacion: Optional[Dict[str, Any]] = None
-        self.ultimo_empleado_liquidado: Optional[Empleado] = None
-        self.ultimo_periodo_liquidado: str = ""
 
-        self._pct_jubilacion = _porc_cfg("aporte_jubilacion", "APORTE_JUBILACION_PORC", 0.11)
-        self._pct_pami = _porc_cfg("aporte_pami", "APORTE_PAMI_PORC", 0.03)
-        self._pct_obra_social = _porc_cfg("aporte_obra_social", "APORTE_OBRA_SOCIAL_PORC", 0.03)
-        self._pct_sindicato = _porc_cfg("aporte_sindicato", "APORTE_SINDICATO_PORC", 0.025)
-        self._pct_presentismo = _porc_cfg("presentismo_porc", "PORC_PRESENTISMO", 0.0833)
+        periodo_actual = datetime.now().strftime("%Y-%m")
+        self.var_empleado = tk.StringVar()
+        self.var_periodo = tk.StringVar(value=periodo_actual)
+        self.var_sueldo_basico = tk.StringVar(value="0.00")
+        self.var_antiguedad = tk.StringVar(value="0")
+        self.var_horas_extra = tk.StringVar(value="0.00")
+        self.var_feriados = tk.StringVar(value="0.00")
+        self.var_ventas = tk.StringVar(value="0.00")
+        self.var_adelanto = tk.StringVar(value="0.00")
 
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(2, weight=1)
+        self.var_aplica_presentismo = tk.BooleanVar(value=True)
+        self.var_aplica_jubilacion = tk.BooleanVar(value=True)
+        self.var_aplica_pami = tk.BooleanVar(value=True)
+        self.var_aplica_obra_social = tk.BooleanVar(value=True)
+        self.var_aplica_sindicato = tk.BooleanVar(value=True)
 
-        self._crear_encabezado()
-        self._crear_panel_seleccion()
-        self._crear_panel_conceptos()
+        self.var_resumen_bruto = tk.StringVar(value="$ 0.00")
+        self.var_resumen_deducciones = tk.StringVar(value="$ 0.00")
+        self.var_resumen_neto = tk.StringVar(value="$ 0.00")
+
+        self._construir_interfaz()
         self._cargar_empleados()
+        self._cargar_historial()
 
-    def _crear_encabezado(self) -> None:
-        """Construye el título y subtítulo del panel."""
-        frame_top = ttk.Frame(self)
-        frame_top.grid(row=0, column=0, padx=20, pady=(15, 5), sticky="ew")
-
+    def _construir_interfaz(self) -> None:
+        """Construye el panel de liquidación, barra lateral derecha e historial."""
+        encabezado = ttk.Frame(self)
+        encabezado.pack(fill="x", padx=8, pady=(8, 4))
+        ttk.Label(encabezado, text="Liquidación de Haberes").pack(anchor="w")
         ttk.Label(
-            frame_top,
-            text="Liquidación de Haberes",
-            style="Subtitulo.TLabel",
-        ).pack(anchor="w")
-
-        ttk.Label(
-            frame_top,
+            encabezado,
             text="Cálculo remunerativo, deducciones de ley y emisión de recibos oficiales",
-            foreground=COLOR_TEXTO_MUTED,
         ).pack(anchor="w")
 
-    def _crear_panel_seleccion(self) -> None:
-        """Construye el selector de empleado y período."""
-        frame_sel = ttk.LabelFrame(self, text=" Selección de Empleado y Período ")
-        frame_sel.grid(row=1, column=0, padx=20, pady=10, sticky="ew")
-        frame_sel.columnconfigure(1, weight=1)
+        frame_superior = ttk.Frame(self)
+        frame_superior.pack(fill="x", padx=8, pady=4)
+        frame_superior.columnconfigure(0, weight=1)
+        frame_superior.columnconfigure(1, weight=1)
 
-        ttk.Label(frame_sel, text="Empleado:").grid(
-            row=0, column=0, padx=10, pady=8, sticky="w"
-        )
-        self.cmb_empleados = ttk.Combobox(frame_sel, state="readonly")
-        self.cmb_empleados.grid(row=0, column=1, padx=10, pady=8, sticky="ew")
-        self.cmb_empleados.bind("<<ComboboxSelected>>", self._al_seleccionar_empleado)
-
-        ttk.Label(frame_sel, text="Período:").grid(
-            row=0, column=2, padx=10, pady=8, sticky="w"
-        )
-        self.txt_periodo = ttk.Entry(frame_sel, width=15)
-        self.txt_periodo.insert(0, datetime.now().strftime("%Y-%m"))
-        self.txt_periodo.grid(row=0, column=3, padx=10, pady=8, sticky="ew")
-
-        ttk.Label(frame_sel, text="Régimen Aplicable:").grid(
-            row=1, column=0, padx=10, pady=8, sticky="w"
-        )
-        self.lbl_regimen = ttk.Label(
-            frame_sel,
-            text="Relación de Dependencia Estándar",
-            font=("Segoe UI", 9, "bold"),
-        )
-        self.lbl_regimen.grid(row=1, column=1, padx=10, pady=8, sticky="w")
-
-    def _crear_panel_conceptos(self) -> None:
-        """Construye los paneles de variables de entrada, deducciones y resultados."""
-        frame_main = ttk.Frame(self)
-        frame_main.grid(row=2, column=0, padx=20, pady=(0, 15), sticky="nsew")
-        frame_main.columnconfigure((0, 1), weight=1)
-        frame_main.rowconfigure(0, weight=1)
-
-        # Panel Izquierdo: Variables de Entrada
-        frame_izq = ttk.LabelFrame(frame_main, text=" Variables de Entrada ")
-        frame_izq.grid(row=0, column=0, padx=(0, 10), sticky="nsew")
+        frame_izq = ttk.LabelFrame(frame_superior, text=" Parámetros de Liquidación ", padding=10)
+        frame_izq.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
         frame_izq.columnconfigure(1, weight=1)
 
-        ttk.Label(frame_izq, text="Salario Básico ($):").grid(
-            row=0, column=0, padx=10, pady=6, sticky="w"
+        ttk.Label(frame_izq, text="Empleado:").grid(row=0, column=0, sticky="w", pady=3)
+        self.combo_empleado = ttk.Combobox(
+            frame_izq, textvariable=self.var_empleado, state="readonly"
         )
-        self.txt_basico = ttk.Entry(frame_izq)
-        self.txt_basico.insert(0, "1200000.00")
-        self.txt_basico.grid(row=0, column=1, padx=10, pady=6, sticky="ew")
+        self.combo_empleado.grid(row=0, column=1, sticky="ew", pady=3)
+        self.combo_empleado.bind("<<ComboboxSelected>>", self._al_cambiar_empleado)
 
-        ttk.Label(frame_izq, text="Años de Antigüedad:").grid(
-            row=1, column=0, padx=10, pady=6, sticky="w"
+        ttk.Label(frame_izq, text="Período (AAAA-MM):").grid(row=1, column=0, sticky="w", pady=3)
+        ttk.Entry(frame_izq, textvariable=self.var_periodo).grid(
+            row=1, column=1, sticky="ew", pady=3
         )
-        self.txt_antiguedad_anios = ttk.Entry(frame_izq)
-        self.txt_antiguedad_anios.insert(0, "0")
-        self.txt_antiguedad_anios.grid(row=1, column=1, padx=10, pady=6, sticky="ew")
 
-        self.var_presentismo = tk.BooleanVar(value=True)
-        self.chk_presentismo = ttk.Checkbutton(
-            frame_izq,
-            text=f"Aplicar Presentismo ({_fmt_pct(self._pct_presentismo)})",
-            variable=self.var_presentismo,
+        ttk.Label(frame_izq, text="Sueldo Básico ($):").grid(row=2, column=0, sticky="w", pady=3)
+        entry_basico = ttk.Entry(
+            frame_izq, textvariable=self.var_sueldo_basico, state="readonly"
         )
-        self.chk_presentismo.grid(row=2, column=0, columnspan=2, padx=10, pady=6, sticky="w")
+        entry_basico.grid(row=2, column=1, sticky="ew", pady=3)
 
-        ttk.Label(frame_izq, text="Cant. Horas Extra (50%):").grid(
-            row=3, column=0, padx=10, pady=6, sticky="w"
+        ttk.Label(frame_izq, text="Antigüedad (años):").grid(row=3, column=0, sticky="w", pady=3)
+        ttk.Entry(frame_izq, textvariable=self.var_antiguedad).grid(
+            row=3, column=1, sticky="ew", pady=3
         )
-        self.txt_horas_extra = ttk.Entry(frame_izq)
-        self.txt_horas_extra.insert(0, "0")
-        self.txt_horas_extra.grid(row=3, column=1, padx=10, pady=6, sticky="ew")
 
-        ttk.Label(frame_izq, text="Feriados Trabajados (100%):").grid(
-            row=4, column=0, padx=10, pady=6, sticky="w"
+        ttk.Label(frame_izq, text="Horas Extra ($):").grid(row=4, column=0, sticky="w", pady=3)
+        ttk.Entry(frame_izq, textvariable=self.var_horas_extra).grid(
+            row=4, column=1, sticky="ew", pady=3
         )
-        self.txt_feriados = ttk.Entry(frame_izq)
-        self.txt_feriados.insert(0, "0")
-        self.txt_feriados.grid(row=4, column=1, padx=10, pady=6, sticky="ew")
 
-        ttk.Label(frame_izq, text="Monto Total Ventas ($):").grid(
-            row=5, column=0, padx=10, pady=6, sticky="w"
+        ttk.Label(frame_izq, text="Feriados ($):").grid(row=5, column=0, sticky="w", pady=3)
+        ttk.Entry(frame_izq, textvariable=self.var_feriados).grid(
+            row=5, column=1, sticky="ew", pady=3
         )
-        self.txt_ventas = ttk.Entry(frame_izq)
-        self.txt_ventas.insert(0, "0.00")
-        self.txt_ventas.grid(row=5, column=1, padx=10, pady=6, sticky="ew")
+
+        ttk.Label(frame_izq, text="Ventas / Comisiones ($):").grid(
+            row=6, column=0, sticky="w", pady=3
+        )
+        ttk.Entry(frame_izq, textvariable=self.var_ventas).grid(
+            row=6, column=1, sticky="ew", pady=3
+        )
 
         ttk.Label(frame_izq, text="Adelanto de Haberes ($):").grid(
-            row=6, column=0, padx=10, pady=6, sticky="w"
+            row=7, column=0, sticky="w", pady=3
         )
-        self.txt_adelanto = ttk.Entry(frame_izq)
-        self.txt_adelanto.insert(0, "0.00")
-        self.txt_adelanto.grid(row=6, column=1, padx=10, pady=6, sticky="ew")
+        ttk.Entry(frame_izq, textvariable=self.var_adelanto).grid(
+            row=7, column=1, sticky="ew", pady=3
+        )
 
-        # Panel Derecho: Deducciones y Resultados
-        frame_der = ttk.LabelFrame(frame_main, text=" Deducciones y Resultados ")
-        frame_der.grid(row=0, column=1, padx=(10, 0), sticky="nsew")
+        frame_checks = ttk.Frame(frame_izq)
+        frame_checks.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(6, 2))
+        ttk.Checkbutton(
+            frame_checks, text="Presentismo", variable=self.var_aplica_presentismo
+        ).pack(side="left", padx=(0, 8))
+        ttk.Checkbutton(
+            frame_checks, text="Jubilación", variable=self.var_aplica_jubilacion
+        ).pack(side="left", padx=(0, 8))
+        ttk.Checkbutton(
+            frame_checks, text="PAMI", variable=self.var_aplica_pami
+        ).pack(side="left", padx=(0, 8))
+        ttk.Checkbutton(
+            frame_checks, text="Obra Social", variable=self.var_aplica_obra_social
+        ).pack(side="left", padx=(0, 8))
+        ttk.Checkbutton(
+            frame_checks, text="Sindicato", variable=self.var_aplica_sindicato
+        ).pack(side="left")
+
+        frame_der = ttk.LabelFrame(frame_superior, text=" Resumen de Liquidación ", padding=10)
+        frame_der.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
         frame_der.columnconfigure(1, weight=1)
 
-        self.var_jubilacion = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            frame_der,
-            text=f"Aportes Jubilatorios ({_fmt_pct(self._pct_jubilacion)})",
-            variable=self.var_jubilacion,
-        ).grid(row=0, column=0, columnspan=2, padx=10, pady=4, sticky="w")
-
-        self.var_pami = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            frame_der,
-            text=f"Ley 19032 / PAMI ({_fmt_pct(self._pct_pami)})",
-            variable=self.var_pami,
-        ).grid(row=1, column=0, columnspan=2, padx=10, pady=4, sticky="w")
-
-        self.var_obra_social = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            frame_der,
-            text=f"Obra Social ({_fmt_pct(self._pct_obra_social)})",
-            variable=self.var_obra_social,
-        ).grid(row=2, column=0, columnspan=2, padx=10, pady=4, sticky="w")
-
-        self.var_sindicato = tk.BooleanVar(value=True)
-        self.chk_sindicato = ttk.Checkbutton(
-            frame_der,
-            text=f"Cuota Sindical ({_fmt_pct(self._pct_sindicato)})",
-            variable=self.var_sindicato,
+        ttk.Label(frame_der, text="Total Haberes / Bruto:").grid(
+            row=0, column=0, sticky="w", pady=6
         )
-        self.chk_sindicato.grid(row=3, column=0, columnspan=2, padx=10, pady=4, sticky="w")
+        ttk.Label(frame_der, textvariable=self.var_resumen_bruto).grid(
+            row=0, column=1, sticky="e", pady=6
+        )
 
-        # Botones de Cálculo y Emisión de Recibo
-        frame_btns_der = ttk.Frame(frame_der)
-        frame_btns_der.grid(row=4, column=0, columnspan=2, padx=10, pady=12, sticky="ew")
-        frame_btns_der.columnconfigure((0, 1), weight=1)
+        ttk.Label(frame_der, text="Total Deducciones:").grid(
+            row=1, column=0, sticky="w", pady=6
+        )
+        ttk.Label(frame_der, textvariable=self.var_resumen_deducciones).grid(
+            row=1, column=1, sticky="e", pady=6
+        )
 
-        self.btn_calcular = ttk.Button(
-            frame_btns_der,
+        ttk.Label(frame_der, text="Neto a Cobrar:").grid(
+            row=2, column=0, sticky="w", pady=6
+        )
+        ttk.Label(frame_der, textvariable=self.var_resumen_neto).grid(
+            row=2, column=1, sticky="e", pady=6
+        )
+
+        frame_botones = ttk.Frame(frame_der)
+        frame_botones.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(16, 0))
+        frame_botones.columnconfigure(0, weight=1)
+        frame_botones.columnconfigure(1, weight=1)
+
+        ttk.Button(
+            frame_botones,
             text="Calcular y Guardar",
-            command=self._procesar_calculo,
-        )
-        self.btn_calcular.grid(row=0, column=0, padx=(0, 5), sticky="ew")
+            command=self._calcular_y_guardar,
+        ).grid(row=0, column=0, padx=(0, 5), sticky="ew")
 
         self.btn_emitir_recibo = ttk.Button(
-            frame_btns_der,
+            frame_botones,
             text="Emitir / Ver Recibo",
             command=self._abrir_vista_previa_recibo,
             state="disabled",
         )
         self.btn_emitir_recibo.grid(row=0, column=1, padx=(5, 0), sticky="ew")
 
-        # Etiquetas dinámicas de resultados
-        self.lbl_res_remunerativo = ttk.Label(
-            frame_der, text="Total Remunerativo: $ 0.00"
-        )
-        self.lbl_res_remunerativo.grid(row=5, column=0, columnspan=2, padx=10, pady=3, sticky="w")
+        frame_hist = ttk.LabelFrame(self, text=" Historial de Liquidaciones ", padding=10)
+        frame_hist.pack(fill="both", expand=True, padx=8, pady=(4, 8))
+        frame_hist.rowconfigure(0, weight=1)
+        frame_hist.columnconfigure(0, weight=1)
 
-        self.lbl_res_no_remunerativo = ttk.Label(
-            frame_der, text="Total No Remunerativo: $ 0.00"
+        columnas = ("id", "empleado", "periodo", "bruto", "deducciones", "neto")
+        self.tabla_hist = ttk.Treeview(
+            frame_hist, columns=columnas, show="headings", height=6
         )
-        self.lbl_res_no_remunerativo.grid(
-            row=6, column=0, columnspan=2, padx=10, pady=3, sticky="w"
-        )
+        self.tabla_hist.heading("id", text="ID")
+        self.tabla_hist.heading("empleado", text="Empleado")
+        self.tabla_hist.heading("periodo", text="Período")
+        self.tabla_hist.heading("bruto", text="Bruto")
+        self.tabla_hist.heading("deducciones", text="Deducciones")
+        self.tabla_hist.heading("neto", text="Neto")
 
-        self.lbl_res_descuentos = ttk.Label(frame_der, text="Total Deducciones: $ 0.00")
-        self.lbl_res_descuentos.grid(row=7, column=0, columnspan=2, padx=10, pady=3, sticky="w")
+        self.tabla_hist.column("id", width=60, anchor="center")
+        self.tabla_hist.column("empleado", width=240, anchor="w")
+        self.tabla_hist.column("periodo", width=110, anchor="center")
+        self.tabla_hist.column("bruto", width=130, anchor="e")
+        self.tabla_hist.column("deducciones", width=130, anchor="e")
+        self.tabla_hist.column("neto", width=130, anchor="e")
 
-        self.lbl_res_neto = ttk.Label(
-            frame_der,
-            text="NETO A COBRAR: $ 0.00",
-            font=("Segoe UI", 11, "bold"),
+        scroll_y = ttk.Scrollbar(
+            frame_hist, orient="vertical", command=self.tabla_hist.yview
         )
-        self.lbl_res_neto.grid(row=8, column=0, columnspan=2, padx=10, pady=(10, 5), sticky="w")
+        self.tabla_hist.configure(yscrollcommand=scroll_y.set)
+        self.tabla_hist.grid(row=0, column=0, sticky="nsew")
+        scroll_y.grid(row=0, column=1, sticky="ns")
 
     def _cargar_empleados(self) -> None:
-        """Consulta la BD mediante el Repositorio de RR. HH. y llena el Combobox."""
+        """Carga los empleados activos en el selector."""
+        self.empleados_por_etiqueta.clear()
         try:
-            self.empleados_lista = RepositorioRRHH.listar_empleados(incluir_inactivos=False)
-            valores_combo = [
-                f"{e.legajo} - {e.apellidos}, {e.nombres} ({e.cargo})"
-                for e in self.empleados_lista
-            ]
-            self.cmb_empleados["values"] = valores_combo
+            empleados = RepositorioRRHH.listar_empleados(incluir_inactivos=False)
+        except _EXCEPCIONES_OPERACION:
+            empleados = []
 
-            if valores_combo:
-                self.cmb_empleados.current(0)
-                self._al_seleccionar_empleado(None)
+        etiquetas: List[str] = []
+        for emp in empleados:
+            etiqueta = f"[{emp.legajo}] {emp.apellidos}, {emp.nombres}".strip()
+            self.empleados_por_etiqueta[etiqueta] = emp
+            etiquetas.append(etiqueta)
 
-        except Exception as err:
-            messagebox.showerror("Error", f"Error al cargar lista de empleados: {err}")
+        self.combo_empleado["values"] = etiquetas
+        if etiquetas:
+            self.var_empleado.set(etiquetas[0])
+            self._al_cambiar_empleado()
 
-    def _al_seleccionar_empleado(self, _event: object) -> None:
-        """Adapta el régimen laboral y carga el sueldo base del empleado seleccionado."""
-        seleccion_idx = self.cmb_empleados.current()
-        if seleccion_idx < 0 or not self.empleados_lista:
+    def _al_cambiar_empleado(self, _event=None) -> None:
+        """Actualiza el sueldo básico mostrado según el empleado seleccionado."""
+        etiqueta = self.var_empleado.get()
+        emp = self.empleados_por_etiqueta.get(etiqueta)
+        self.empleado_actual = emp
+        if emp is not None:
+            sueldo = float(getattr(emp, "sueldo", 0.0) or 0.0)
+            self.var_sueldo_basico.set(f"{sueldo:.2f}")
+        else:
+            self.var_sueldo_basico.set("0.00")
+
+    @staticmethod
+    def _a_float(texto: str, nombre_campo: str) -> float:
+        limpio = (texto or "").strip().replace(",", ".")
+        if not limpio:
+            return 0.0
+        valor = float(limpio)
+        if valor < 0:
+            raise ValueError(f"'{nombre_campo}' no puede ser negativo.")
+        return valor
+
+    @staticmethod
+    def _a_int(texto: str, nombre_campo: str) -> int:
+        limpio = (texto or "").strip()
+        if not limpio:
+            return 0
+        valor = int(limpio)
+        if valor < 0:
+            raise ValueError(f"'{nombre_campo}' no puede ser negativo.")
+        return valor
+
+    def _calcular_y_guardar(self) -> None:
+        """Calcula los haberes, persiste la liquidación y habilita la emisión del recibo."""
+        if not self.empleado_actual or not self.empleado_actual.id_empleado:
+            messagebox.showwarning(
+                "Empleado Requerido",
+                "Seleccione un empleado válido antes de liquidar.",
+                parent=self,
+            )
             return
 
-        emp = self.empleados_lista[seleccion_idx]
-        cargo_lower = (emp.cargo or "").strip().lower()
-        vinculo_lower = (getattr(emp, "tipo_vinculo", "") or "").strip().lower()
+        periodo = self.var_periodo.get().strip()
+        if not periodo:
+            messagebox.showwarning(
+                "Período Requerido",
+                "Ingrese el período de liquidación (ej. 2026-11).",
+                parent=self,
+            )
+            return
 
-        if cargo_lower in ("admin", "administrador") or vinculo_lower in ("admin", "administrador"):
-            self.lbl_regimen.config(text="Locación de Servicios - Categoría D")
-            self.chk_sindicato.config(state="disabled")
-            self.var_sindicato.set(False)
-        elif cargo_lower == "gerente":
-            self.lbl_regimen.config(text="Monotributo - Categoría F")
-            self.chk_sindicato.config(state="disabled")
-            self.var_sindicato.set(False)
-        elif vinculo_lower == "pasante":
-            self.lbl_regimen.config(text="Pasante (Sin cuota sindical)")
-            self.chk_sindicato.config(state="disabled")
-            self.var_sindicato.set(False)
-        else:
-            self.lbl_regimen.config(text="Relación de Dependencia Estándar")
-            self.chk_sindicato.config(state="normal")
-            self.var_sindicato.set(True)
-
-        if emp.sueldo and emp.sueldo > 0:
-            self.txt_basico.delete(0, "end")
-            self.txt_basico.insert(0, f"{emp.sueldo:.2f}")
-
-    @staticmethod
-    def _parse_float(texto: str) -> float:
-        limpio = (texto or "0").strip().replace(",", ".")
-        return float(limpio) if limpio else 0.0
-
-    @staticmethod
-    def _parse_int(texto: str) -> int:
-        limpio = (texto or "0").strip()
-        return int(limpio) if limpio else 0
-
-    def _procesar_calculo(self) -> None:
-        """Calcula los haberes, persiste la liquidación y habilita la emisión del recibo."""
         try:
-            seleccion_idx = self.cmb_empleados.current()
-            if seleccion_idx < 0 or not self.empleados_lista:
-                messagebox.showwarning("Atención", "Seleccione un empleado activo de la nómina.")
-                return
+            basico = self._a_float(self.var_sueldo_basico.get(), "Sueldo Básico")
+            antiguedad = self._a_int(self.var_antiguedad.get(), "Antigüedad")
+            horas_extra = self._a_float(self.var_horas_extra.get(), "Horas Extra")
+            feriados = self._a_float(self.var_feriados.get(), "Feriados")
+            ventas = self._a_float(self.var_ventas.get(), "Ventas")
+            adelanto = self._a_float(self.var_adelanto.get(), "Adelanto de Haberes")
+        except ValueError as exc:
+            messagebox.showwarning("Dato Inválido", str(exc), parent=self)
+            return
 
-            emp = self.empleados_lista[seleccion_idx]
-            periodo = self.txt_periodo.get().strip()
-            if not periodo:
-                messagebox.showwarning("Atención", "Ingrese un período válido (ej. 2026-11).")
-                return
-
-            basico_val = self._parse_float(self.txt_basico.get())
-            antiguedad_val = self._parse_int(self.txt_antiguedad_anios.get())
-            horas_extra_val = self._parse_float(self.txt_horas_extra.get())
-            feriados_val = self._parse_float(self.txt_feriados.get())
-            ventas_val = self._parse_float(self.txt_ventas.get())
-            adelanto_val = self._parse_float(self.txt_adelanto.get())
-
-            if any(
-                v < 0
-                for v in (
-                    basico_val,
-                    antiguedad_val,
-                    horas_extra_val,
-                    feriados_val,
-                    ventas_val,
-                    adelanto_val,
-                )
-            ):
-                messagebox.showwarning(
-                    "Valores Inválidos",
-                    "Los montos, años, horas o feriados no pueden ser negativos.",
-                )
-                return
-
-            res = RepositorioHaberes.calcular_liquidacion(
-                id_empleado=int(emp.id_empleado or 0),
+        try:
+            repo = RepositorioHaberes()
+            res = repo.calcular_liquidacion(
+                id_empleado=self.empleado_actual.id_empleado,
                 periodo=periodo,
-                basico=basico_val,
-                antiguedad_anios=antiguedad_val,
-                aplica_presentismo=bool(self.var_presentismo.get()),
-                horas_extra=horas_extra_val,
-                feriados=feriados_val,
-                ventas=ventas_val,
-                adelanto=adelanto_val,
-                aplica_jubilacion=bool(self.var_jubilacion.get()),
-                aplica_pami=bool(self.var_pami.get()),
-                aplica_obra_social=bool(self.var_obra_social.get()),
-                aplica_sindicato=bool(self.var_sindicato.get()),
+                basico=basico,
+                antiguedad_anios=antiguedad,
+                aplica_presentismo=bool(self.var_aplica_presentismo.get()),
+                horas_extra=horas_extra,
+                feriados=feriados,
+                ventas=ventas,
+                adelanto=adelanto,
+                aplica_jubilacion=bool(self.var_aplica_jubilacion.get()),
+                aplica_pami=bool(self.var_aplica_pami.get()),
+                aplica_obra_social=bool(self.var_aplica_obra_social.get()),
+                aplica_sindicato=bool(self.var_aplica_sindicato.get()),
+            )
+            datos_liq = res if isinstance(res, dict) else {}
+            bruto = float(
+                datos_liq.get(
+                    "bruto",
+                    datos_liq.get("total_remunerativo", basico + horas_extra + feriados + ventas),
+                )
+                or 0.0
+            )
+            deducciones = float(
+                datos_liq.get(
+                    "deducciones",
+                    datos_liq.get("total_deducciones", adelanto),
+                )
+                or 0.0
+            )
+            neto = float(
+                datos_liq.get(
+                    "neto",
+                    datos_liq.get("neto_a_cobrar", bruto - deducciones),
+                )
+                or 0.0
             )
 
-            if isinstance(res, dict):
-                remunerativo = float(res.get("remunerativo", 0.0))
-                no_remunerativo = float(res.get("no_remunerativo", 0.0))
-                descuentos = float(res.get("descuentos", 0.0))
-                neto = float(res.get("neto", 0.0))
+            self.ultima_liquidacion = {
+                "empleado": self.empleado_actual,
+                "periodo": periodo,
+                "sueldo_basico": basico,
+                "antiguedad_anios": antiguedad,
+                "horas_extra": horas_extra,
+                "feriados": feriados,
+                "ventas": ventas,
+                "adelanto": adelanto,
+                "bruto": bruto,
+                "deducciones": deducciones,
+                "neto": neto,
+                "detalle": datos_liq,
+            }
 
-                self.lbl_res_remunerativo.config(
-                    text=f"Total Remunerativo: $ {remunerativo:,.2f}"
-                )
-                self.lbl_res_no_remunerativo.config(
-                    text=f"Total No Remunerativo: $ {no_remunerativo:,.2f}"
-                )
-                self.lbl_res_descuentos.config(
-                    text=f"Total Deducciones: $ {descuentos:,.2f}"
-                )
-                self.lbl_res_neto.config(text=f"NETO A COBRAR: $ {neto:,.2f}")
+            self.var_resumen_bruto.set(f"$ {bruto:,.2f}")
+            self.var_resumen_deducciones.set(f"$ {deducciones:,.2f}")
+            self.var_resumen_neto.set(f"$ {neto:,.2f}")
+            self.btn_emitir_recibo.config(state="normal")
+            self._cargar_historial()
 
-                res_completo = dict(res)
-                res_completo["basico"] = basico_val
-                res_completo["adicionales"] = max(0.0, remunerativo - basico_val)
-                if "desglose_deducciones" not in res_completo:
-                    res_completo["desglose_deducciones"] = {
-                        "jubilacion": remunerativo * self._pct_jubilacion
-                        if self.var_jubilacion.get()
-                        else 0.0,
-                        "pami": remunerativo * self._pct_pami
-                        if self.var_pami.get()
-                        else 0.0,
-                        "obra_social": remunerativo * self._pct_obra_social
-                        if self.var_obra_social.get()
-                        else 0.0,
-                        "sindicato": remunerativo * self._pct_sindicato
-                        if self.var_sindicato.get()
-                        else 0.0,
-                        "adelanto": adelanto_val,
-                    }
-
-                self.ultima_liquidacion = res_completo
-                self.ultimo_empleado_liquidado = emp
-                self.ultimo_periodo_liquidado = periodo
-                self.btn_emitir_recibo.config(state="normal")
-
-            messagebox.showinfo("Éxito", "Liquidación calculada y registrada correctamente.")
-
-        except ValueError:
-            messagebox.showerror(
-                "Error", "Revise los campos numéricos ingresados (deben ser válidos)."
+            messagebox.showinfo(
+                "Liquidación Guardada",
+                f"Liquidación registrada para {self.empleado_actual.legajo} ({periodo}).",
+                parent=self,
             )
-        except Exception as err:
+        except _EXCEPCIONES_OPERACION as exc:
             messagebox.showerror(
-                "Error en proceso", f"No se pudo procesar la liquidación: {err}"
+                "Error en Liquidación",
+                f"No se pudo calcular o guardar la liquidación: {exc}",
+                parent=self,
+            )
+
+    def _cargar_historial(self) -> None:
+        """Recarga la tabla del historial de liquidaciones."""
+        for fila in self.tabla_hist.get_children():
+            self.tabla_hist.delete(fila)
+
+        try:
+            repo = RepositorioHaberes()
+            registros = repo.listar_liquidaciones()
+        except _EXCEPCIONES_OPERACION:
+            registros = []
+
+        for reg in registros:
+            if isinstance(reg, dict):
+                id_liq = reg.get("id_liquidacion", reg.get("id", ""))
+                emp_txt = reg.get("empleado", reg.get("id_empleado", ""))
+                periodo = reg.get("periodo", "")
+                bruto = float(
+                    reg.get("bruto", reg.get("total_remunerativo", 0.0)) or 0.0
+                )
+                ded = float(
+                    reg.get("deducciones", reg.get("total_deducciones", 0.0)) or 0.0
+                )
+                neto = float(
+                    reg.get("neto", reg.get("neto_a_cobrar", 0.0)) or 0.0
+                )
+            else:
+                id_liq = getattr(reg, "id_liquidacion", getattr(reg, "id", ""))
+                emp_txt = getattr(reg, "empleado", getattr(reg, "id_empleado", ""))
+                periodo = getattr(reg, "periodo", "")
+                bruto = float(
+                    getattr(reg, "bruto", getattr(reg, "total_remunerativo", 0.0)) or 0.0
+                )
+                ded = float(
+                    getattr(reg, "deducciones", getattr(reg, "total_deducciones", 0.0))
+                    or 0.0
+                )
+                neto = float(
+                    getattr(reg, "neto", getattr(reg, "neto_a_cobrar", 0.0)) or 0.0
+                )
+
+            self.tabla_hist.insert(
+                "",
+                "end",
+                values=(
+                    id_liq,
+                    emp_txt,
+                    periodo,
+                    f"$ {bruto:,.2f}",
+                    f"$ {ded:,.2f}",
+                    f"$ {neto:,.2f}",
+                ),
             )
 
     def _abrir_vista_previa_recibo(self) -> None:
-        """Despliega una ventana modal con el recibo oficial y permite exportarlo a HTML/PDF."""
-        if not self.ultima_liquidacion or not self.ultimo_empleado_liquidado:
+        """Despliega una ventana modal con el recibo oficial y permite exportarlo a HTML."""
+        if not self.ultima_liquidacion:
             messagebox.showwarning(
-                "Atención", "Primero debe calcular y guardar una liquidación."
+                "Sin Liquidación",
+                "Primero calcule y guarde una liquidación.",
+                parent=self,
             )
             return
 
-        emp = self.ultimo_empleado_liquidado
         liq = self.ultima_liquidacion
-        periodo = self.ultimo_periodo_liquidado
-        ded = liq.get("desglose_deducciones", {})
-        fecha_emision = datetime.now().strftime("%d/%m/%Y %H:%M")
-
-        nombre_completo = f"{emp.apellidos}, {emp.nombres}"
-        otros_desc = float(ded.get("sindicato", 0.0)) + float(ded.get("adelanto", 0.0))
+        emp: Empleado = liq["empleado"]
+        periodo: str = liq["periodo"]
 
         texto_recibo = (
-            "========================================================================\n"
+            "================================================================\n"
             "                 FRANKIE GESTOR S.R.L. - RECIBO DE HABERES              \n"
             "                      Ley 20.744 - Comprobante de Pago                  \n"
-            "========================================================================\n"
-            f" Fecha Emisión : {fecha_emision:<22} Período : {periodo}\n"
-            f" Empleado      : {nombre_completo[:22]:<22} Legajo  : {emp.legajo}\n"
-            f" CUIL / DNI    : {emp.nro_documento:<22} Cargo   : {emp.cargo}\n"
-            "------------------------------------------------------------------------\n"
+            "================================================================\n"
+            f" Legajo: {emp.legajo:<12} Período: {periodo}\n"
+            f" Empleado: {emp.apellidos}, {emp.nombres}\n"
+            f" CUIL/Doc: {emp.nro_documento}   Cargo: {emp.cargo}\n"
+            "----------------------------------------------------------------\n"
             " CONCEPTO                                  HABERES         DEDUCCIONES  \n"
-            "------------------------------------------------------------------------\n"
-            f" Sueldo Básico                           $ {float(liq.get('basico', 0.0)):>10,.2f}\n"
-            f" Adicionales Remunerativos               $ {float(liq.get('adicionales', 0.0)):>10,.2f}\n"
-            f" Haberes No Remunerativos                $ {float(liq.get('no_remunerativo', 0.0)):>10,.2f}\n"
-            f" Aporte Jubilatorio ({_fmt_pct(self._pct_jubilacion):>4})                           $ {float(ded.get('jubilacion', 0.0)):>10,.2f}\n"
-            f" Ley 19.032 - PAMI ({_fmt_pct(self._pct_pami):>4})                              $ {float(ded.get('pami', 0.0)):>10,.2f}\n"
-            f" Obra Social ({_fmt_pct(self._pct_obra_social):>4})                                    $ {float(ded.get('obra_social', 0.0)):>10,.2f}\n"
-            f" Cuota Sindical / Adelantos                              $ {otros_desc:>10,.2f}\n"
-            "------------------------------------------------------------------------\n"
-            f" TOTALES                                 $ {float(liq.get('remunerativo', 0.0)):>10,.2f}   $ {float(liq.get('descuentos', 0.0)):>10,.2f}\n"
-            "========================================================================\n"
-            f" NETO A COBRAR:                          $ {float(liq.get('neto', 0.0)):>10,.2f}\n"
-            "========================================================================\n"
-            "\n\n"
-            "   ___________________________             ___________________________  \n"
-            "       Firma del Empleador                     Firma del Empleado       \n"
+            "----------------------------------------------------------------\n"
+            f" Sueldo Básico                         $ {float(liq.get('sueldo_basico', 0.0)):>10,.2f}\n"
+            f" Horas Extra                           $ {float(liq.get('horas_extra', 0.0)):>10,.2f}\n"
+            f" Feriados                              $ {float(liq.get('feriados', 0.0)):>10,.2f}\n"
+            f" Ventas / Comisiones                   $ {float(liq.get('ventas', 0.0)):>10,.2f}\n"
+            f" Adelanto de Haberes                                        $ {float(liq.get('adelanto', 0.0)):>10,.2f}\n"
+            "----------------------------------------------------------------\n"
+            f" TOTAL BRUTO                           $ {float(liq.get('bruto', 0.0)):>10,.2f}\n"
+            f" TOTAL DEDUCCIONES                                          $ {float(liq.get('deducciones', 0.0)):>10,.2f}\n"
+            f" NETO A COBRAR                         $ {float(liq.get('neto', 0.0)):>10,.2f}\n"
+            "================================================================\n"
         )
 
         modal = tk.Toplevel(self)
         modal.title(f"Recibo de Haberes - {emp.legajo} ({periodo})")
-        modal.geometry("670x540")
-        modal.resizable(False, False)
-        modal.grab_set()
+        modal.geometry("680x460")
+        modal.transient(self.winfo_toplevel())
 
-        frame_contenedor = ttk.Frame(modal, padding=15)
-        frame_contenedor.pack(fill="both", expand=True)
-
-        txt_vista = tk.Text(
-            frame_contenedor,
-            font=("Courier New", 10),
-            bg="#FFFFFF",
-            fg="#1E293B",
-            relief="solid",
-            borderwidth=1,
-            padx=12,
-            pady=12,
-            height=22,
-        )
+        txt_vista = tk.Text(modal, wrap="none", padx=12, pady=12)
+        txt_vista.pack(fill="both", expand=True, padx=10, pady=(10, 5))
         txt_vista.insert("1.0", texto_recibo)
         txt_vista.config(state="disabled")
-        txt_vista.pack(fill="both", expand=True, pady=(0, 12))
 
-        def exportar_e_imprimir() -> None:
-            carpeta_recibos = Path(__file__).resolve().parent.parent.parent / "recibos"
-            carpeta_recibos.mkdir(parents=True, exist_ok=True)
-            legajo_limpio = str(emp.legajo).replace(" ", "_")
-            periodo_limpio = periodo.replace("/", "-").replace(" ", "_")
-            archivo_html = carpeta_recibos / f"Recibo_{legajo_limpio}_{periodo_limpio}.html"
-
+        def _exportar_html() -> None:
+            archivo_html = obtener_ruta_recibo_html(emp.legajo, periodo)
             html_contenido = f"""<!DOCTYPE html>
-<html lang="es">
+<html lang='es'>
 <head>
-<meta charset="UTF-8">
-<title>Recibo {legajo_limpio} - {periodo}</title>
+<meta charset='utf-8'>
+<title>Recibo {emp.legajo} - {periodo}</title>
 <style>
-  body {{ font-family: 'Courier New', monospace; padding: 30px; background: #f8fafc; }}
+  body {{ font-family: monospace; background: #f1f5f9; padding: 20px; }}
   .recibo {{ background: #fff; border: 2px solid #0f172a; padding: 25px; max-width: 720px; margin: auto; white-space: pre; }}
-  @media print {{ body {{ background: #fff; padding: 0; }} .no-print {{ display: none; }} }}
 </style>
 </head>
 <body>
-  <div class="recibo">{texto_recibo}</div>
-  <p class="no-print" style="text-align:center; margin-top:15px;">
-    <button onclick="window.print()" style="padding:10px 20px; font-size:15px; cursor:pointer;">Imprimir / Guardar como PDF</button>
-  </p>
+  <div class='recibo'>{texto_recibo}</div>
 </body>
-</html>"""
+</html>
+"""
             archivo_html.write_text(html_contenido, encoding="utf-8")
-            webbrowser.open(archivo_html.as_uri())
             messagebox.showinfo(
-                "Recibo Exportado", f"Comprobante guardado en:\n{archivo_html}"
+                "Recibo Exportado",
+                f"Comprobante guardado en:\n{archivo_html}",
+                parent=modal,
             )
 
-        frame_acciones = ttk.Frame(frame_contenedor)
-        frame_acciones.pack(fill="x")
+        ttk.Button(modal, text="Exportar HTML", command=_exportar_html).pack(
+            pady=(0, 10)
+        )
 
-        ttk.Button(
-            frame_acciones, text="Exportar / Imprimir PDF", command=exportar_e_imprimir
-        ).pack(side="left")
-        ttk.Button(frame_acciones, text="Cerrar", command=modal.destroy).pack(side="right")
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    root.title("Frankie Gestor - Liquidación de Haberes")
+    root.geometry("1120x720")
+    vista = InterfazHaberes(root)
+    vista.pack(fill="both", expand=True, padx=10, pady=10)
+    root.mainloop()

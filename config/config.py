@@ -7,7 +7,24 @@ Centraliza constantes globales del sistema para evitar valores dispersos.
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Final, Tuple
+
+BASE_DIR: Final[Path] = Path(__file__).resolve().parent
+
+# Directorios de comprobantes generados
+DIR_COMPROBANTES: Final[Path] = BASE_DIR / "comprobantes"
+DIR_RECIBOS_HABERES: Final[Path] = DIR_COMPROBANTES / "recibo_haberes"
+DIR_FACTURAS: Final[Path] = DIR_COMPROBANTES / "facturas"
+DIR_ORDENES_COMPRA: Final[Path] = DIR_COMPROBANTES / "ordenes_de_compra"
+
+for _carpeta in (
+    DIR_COMPROBANTES,
+    DIR_RECIBOS_HABERES,
+    DIR_FACTURAS,
+    DIR_ORDENES_COMPRA,
+):
+    _carpeta.mkdir(parents=True, exist_ok=True)
 
 IVA_POR_DEFECTO: Final[float] = 0.21
 IMPUESTO_PROVINCIAL_PORC: Final[float] = 0.03  # 3% sobre precio de lista
@@ -42,6 +59,29 @@ TIPOS_VINCULO_EMPLEADO: Final[Tuple[str, ...]] = (
     "Pasante",
     "Permanente",
 )
+
+# Sueldos básicos de referencia por cargo y factor según situación de revista / vínculo
+SUELDOS_BASICOS_POR_CARGO: Final[Dict[str, float]] = {
+    "Gerente": 1800000.0,
+    "Admin": 1350000.0,
+    "Administrativo": 1150000.0,
+    "Vendedor": 1100000.0,
+}
+
+FACTOR_VINCULO_SUELDO: Final[Dict[str, float]] = {
+    "Propietario": 1.0,
+    "Permanente": 1.0,
+    "Contratado": 0.90,
+    "Pasante": 0.65,
+}
+
+
+def obtener_sueldo_basico(cargo: str, tipo_vinculo: str = "Permanente") -> float:
+    """Calcula el sueldo básico de referencia según cargo y situación de revista."""
+    base = float(SUELDOS_BASICOS_POR_CARGO.get(cargo, 1000000.0))
+    factor = float(FACTOR_VINCULO_SUELDO.get(tipo_vinculo, 1.0))
+    return round(base * factor, 2)
+
 
 # Parámetros comerciales y de ventas (Módulo 3)
 # Tramos de descuento por cantidad: {cantidad_minima: descuento_proporcion}
@@ -92,6 +132,10 @@ class ConfiguracionSistema:
     cargos_empleado: Tuple[str, ...] = CARGOS_EMPLEADO
     sectores_empleado: Tuple[str, ...] = SECTORES_EMPLEADO
     tipos_vinculo_empleado: Tuple[str, ...] = TIPOS_VINCULO_EMPLEADO
+    dir_comprobantes: Path = DIR_COMPROBANTES
+    dir_recibos_haberes: Path = DIR_RECIBOS_HABERES
+    dir_facturas: Path = DIR_FACTURAS
+    dir_ordenes_compra: Path = DIR_ORDENES_COMPRA
 
     def __post_init__(self) -> None:
         parametros_tasa = (

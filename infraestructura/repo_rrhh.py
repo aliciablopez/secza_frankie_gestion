@@ -10,32 +10,31 @@ coordinando transacciones atómicas sobre 'personas' y 'empleados'.
 from typing import Any, List, Optional
 
 from dominio.entidades_persona import limpiar_documento
-from dominio.entidades_rrhh import Empleado
+from dominio.entidades_rrhh import CARGOS, SECTORES, TIPOS_VINCULO, Empleado
 from infraestructura.conexion import ConexionDB
+
+try:
+    from config import obtener_sueldo_basico as _obtener_sueldo_basico_cfg
+except ImportError:
+    _obtener_sueldo_basico_cfg = None
+
+
+def _calcular_sueldo_config(cargo: str, vinculo: str) -> float:
+    """Calcula el sueldo básico desde config según cargo y situación de revista."""
+    if callable(_obtener_sueldo_basico_cfg):
+        try:
+            return float(_obtener_sueldo_basico_cfg(cargo, vinculo))
+        except Exception:
+            pass
+    return 0.0
 
 
 class RepositorioRRHH:
     """Capa de acceso a datos para la gestión del personal y registros de personas."""
 
-    CARGOS_VALIDOS = (
-        "Gerente",
-        "Administrativo",
-        "Admin",
-        "Vendedor",
-    )
-    SECTORES_VALIDOS = (
-        "Gestión",
-        "Staff",
-        "Ventas",
-        "Compras",
-        "Administración",
-    )
-    VINCULOS_VALIDOS = (
-        "Propietario",
-        "Contratado",
-        "Pasante",
-        "Permanente",
-    )
+    CARGOS_VALIDOS = tuple(CARGOS)
+    SECTORES_VALIDOS = tuple(SECTORES)
+    VINCULOS_VALIDOS = tuple(TIPOS_VINCULO)
 
     @staticmethod
     def _obtener_columnas_tabla(cursor, tabla: str) -> List[str]:
@@ -56,11 +55,10 @@ class RepositorioRRHH:
 
     @classmethod
     def _normalizar_datos_laborales(cls, emp: Empleado) -> tuple[str, str, str, float]:
-        """Normaliza y valida cargo, sector, tipo de vínculo y sueldo."""
+        """Normaliza y valida cargo, sector y tipo de vínculo; lee el sueldo desde config."""
         cargo = (getattr(emp, "cargo", "") or "").strip()
         sector = (getattr(emp, "sector", "") or "").strip()
         vinculo = (getattr(emp, "tipo_vinculo", "") or "Contratado").strip()
-        sueldo = float(getattr(emp, "sueldo", 0.0) or 0.0)
 
         if not cargo:
             raise ValueError("El cargo del empleado es obligatorio.")
@@ -70,8 +68,14 @@ class RepositorioRRHH:
             )
         if not sector:
             raise ValueError("El sector del empleado es obligatorio.")
+        if sector not in cls.SECTORES_VALIDOS:
+            raise ValueError(
+                f"Sector inválido '{sector}'. Valores permitidos: {', '.join(cls.SECTORES_VALIDOS)}."
+            )
         if vinculo not in cls.VINCULOS_VALIDOS:
             vinculo = "Contratado"
+
+        sueldo = _calcular_sueldo_config(cargo, vinculo)
         if sueldo < 0.0:
             raise ValueError("El sueldo del empleado no puede ser negativo.")
 
@@ -180,6 +184,7 @@ class RepositorioRRHH:
                 emp.id_persona = id_persona_nueva
                 emp.id_empleado = cursor.lastrowid
                 emp.legajo = legajo_final
+                emp.sueldo = sueldo
                 return True
 
             except Exception as e:
@@ -270,6 +275,7 @@ class RepositorioRRHH:
                 )
 
                 emp.legajo = legajo_final
+                emp.sueldo = sueldo
                 return cursor.rowcount > 0
 
             except Exception as e:
@@ -303,24 +309,50 @@ class RepositorioRRHH:
             return cursor.rowcount > 0
 
     @staticmethod
+    def _construir_empleado_desde_fila(fila: Any, tiene_domicilio: bool) -> Empleado:
+        """Reconstruye una entidad Empleado a partir de una fila de JOIN empleados + personas."""
+        domicilio = fila["domicilio"] if tiene_domicilio else ""
+        return Empleado(
+            id_empleado=fila["id_empleado"],
+            id_persona=fila["id_persona"],
+            id_usuario=fila["id_usuario"],
+            nro_documento=fila["nro_documento"],
+            tipo_documento=fila["tipo_documento"] or "CUIL",
+            nombres=fila["nombres"],
+            apellidos=fila["apellidos"],
+            legajo=fila["legajo"],
+            cargo=fila["cargo"],
+            sector=fila["sector"],
+            tipo_vinculo=fila["tipo_vinculo"],
+            domicilio=domicilio,
+            email=fila["email"],
+            telefono=fila["telefono"],
+            activo=bool(fila["activo"]),
+        )
+
+    @staticmethod
     def obtener_empleado_por_id(id_empleado: int) -> Optional[Empleado]:
         """Recupera un empleado puntual uniendo 'empleados' y 'personas'."""
         with ConexionDB() as conn:
             cursor = conn.cursor()
             cols_emp = RepositorioRRHH._obtener_columnas_tabla(cursor, "empleados")
+            cols_per = RepositorioRRHH._obtener_columnas_tabla(cursor, "personas")
+
             col_vinculo = (
                 "e.tipo_vinculo" if "tipo_vinculo" in cols_emp else "'Contratado' AS tipo_vinculo"
             )
             col_activo = (
                 "COALESCE(e.activo, 1) AS activo" if "activo" in cols_emp else "1 AS activo"
             )
+            tiene_domicilio = "domicilio" in cols_per
+            col_domicilio = "p.domicilio" if tiene_domicilio else "'' AS domicilio"
 
             cursor.execute(
                 f"""
                 SELECT e.id AS id_empleado, e.id_persona, e.id_usuario, e.legajo, e.cargo,
                        e.sector, {col_vinculo}, e.sueldo, {col_activo},
                        p.tipo_documento, p.nro_documento, p.nombres, p.apellidos,
-                       p.email, p.telefono
+                       {col_domicilio}, p.email, p.telefono
                 FROM empleados e
                 JOIN personas p ON e.id_persona = p.id
                 WHERE e.id = ?;
@@ -331,23 +363,7 @@ class RepositorioRRHH:
             if not f:
                 return None
 
-            return Empleado(
-                id_empleado=f["id_empleado"],
-                id_persona=f["id_persona"],
-                id_usuario=f["id_usuario"],
-                nro_documento=f["nro_documento"],
-                tipo_documento=f["tipo_documento"] or "CUIL",
-                nombres=f["nombres"],
-                apellidos=f["apellidos"],
-                legajo=f["legajo"],
-                cargo=f["cargo"],
-                sector=f["sector"],
-                tipo_vinculo=f["tipo_vinculo"],
-                sueldo=f["sueldo"],
-                email=f["email"],
-                telefono=f["telefono"],
-                activo=bool(f["activo"]),
-            )
+            return RepositorioRRHH._construir_empleado_desde_fila(f, tiene_domicilio)
 
     @staticmethod
     def listar_empleados(
@@ -357,6 +373,7 @@ class RepositorioRRHH:
         with ConexionDB() as conn:
             cursor = conn.cursor()
             cols_emp = RepositorioRRHH._obtener_columnas_tabla(cursor, "empleados")
+            cols_per = RepositorioRRHH._obtener_columnas_tabla(cursor, "personas")
 
             col_vinculo = (
                 "e.tipo_vinculo" if "tipo_vinculo" in cols_emp else "'Contratado' AS tipo_vinculo"
@@ -364,12 +381,14 @@ class RepositorioRRHH:
             col_activo = (
                 "COALESCE(e.activo, 1) AS activo" if "activo" in cols_emp else "1 AS activo"
             )
+            tiene_domicilio = "domicilio" in cols_per
+            col_domicilio = "p.domicilio" if tiene_domicilio else "'' AS domicilio"
 
             query = f"""
                 SELECT e.id AS id_empleado, e.id_persona, e.id_usuario, e.legajo, e.cargo,
                        e.sector, {col_vinculo}, e.sueldo, {col_activo},
                        p.tipo_documento, p.nro_documento, p.nombres, p.apellidos,
-                       p.email, p.telefono
+                       {col_domicilio}, p.email, p.telefono
                 FROM empleados e
                 JOIN personas p ON e.id_persona = p.id
                 WHERE 1 = 1
@@ -390,25 +409,7 @@ class RepositorioRRHH:
             cursor.execute(query, parametros)
             filas = cursor.fetchall()
 
-            lista: List[Empleado] = []
-            for f in filas:
-                emp = Empleado(
-                    id_empleado=f["id_empleado"],
-                    id_persona=f["id_persona"],
-                    id_usuario=f["id_usuario"],
-                    nro_documento=f["nro_documento"],
-                    tipo_documento=f["tipo_documento"] or "CUIL",
-                    nombres=f["nombres"],
-                    apellidos=f["apellidos"],
-                    legajo=f["legajo"],
-                    cargo=f["cargo"],
-                    sector=f["sector"],
-                    tipo_vinculo=f["tipo_vinculo"],
-                    sueldo=f["sueldo"],
-                    email=f["email"],
-                    telefono=f["telefono"],
-                    activo=bool(f["activo"]),
-                )
-                lista.append(emp)
-
-            return lista
+            return [
+                RepositorioRRHH._construir_empleado_desde_fila(f, tiene_domicilio)
+                for f in filas
+            ]
