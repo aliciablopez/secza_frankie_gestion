@@ -25,14 +25,17 @@ COLOR_TEXTO_MUTED = "#556B2F"    # Texto secundario / notas (darkolivegreen)
 COLOR_FOCO = "azure"             # Fondo al enfocar campos de entrada (focus)
 COLOR_BORDE = "darkolivegreen"   # Bordes de contenedores y controles
 
+TAMANIO_BASE = 12
+ALTO_FILA_TABLA = 34
+
 FUENTE_PREFERIDA = "Atkinson Hyperlegible"
 FUENTE_RESPALDO = "Segoe UI" if sys.platform.startswith("win") else "TkDefaultFont"
 
 FUENTE_FAMILIA = FUENTE_PREFERIDA
-FUENTE_BASE = (FUENTE_FAMILIA, 10)
-FUENTE_BOTON = (FUENTE_FAMILIA, 12)               # 12 pt sin negrita para botones
-FUENTE_TITULO = (FUENTE_FAMILIA, 12, "bold")      # Negrita reservada para títulos
-FUENTE_ENCABEZADO = (FUENTE_FAMILIA, 10, "bold")  # Negrita para cabeceras de tabla
+FUENTE_BASE = (FUENTE_FAMILIA, TAMANIO_BASE, "normal")
+FUENTE_BOTON = (FUENTE_FAMILIA, TAMANIO_BASE, "normal")
+FUENTE_TITULO = (FUENTE_FAMILIA, TAMANIO_BASE, "bold")
+FUENTE_ENCABEZADO = (FUENTE_FAMILIA, TAMANIO_BASE, "bold")
 
 _FUENTES_CARGADAS = False
 
@@ -108,10 +111,30 @@ def _actualizar_fuentes_globales(familia: str) -> None:
     """Actualiza las constantes de fuente con la familia resuelta."""
     global FUENTE_FAMILIA, FUENTE_BASE, FUENTE_BOTON, FUENTE_TITULO, FUENTE_ENCABEZADO
     FUENTE_FAMILIA = familia
-    FUENTE_BASE = (FUENTE_FAMILIA, 10)
-    FUENTE_BOTON = (FUENTE_FAMILIA, 12)
-    FUENTE_TITULO = (FUENTE_FAMILIA, 12, "bold")
-    FUENTE_ENCABEZADO = (FUENTE_FAMILIA, 10, "bold")
+    FUENTE_BASE = (FUENTE_FAMILIA, TAMANIO_BASE, "normal")
+    FUENTE_BOTON = (FUENTE_FAMILIA, TAMANIO_BASE, "normal")
+    FUENTE_TITULO = (FUENTE_FAMILIA, TAMANIO_BASE, "bold")
+    FUENTE_ENCABEZADO = (FUENTE_FAMILIA, TAMANIO_BASE, "bold")
+
+
+def _sincronizar_fuentes_tk(root: tk.Misc) -> None:
+    """Asegura que las fuentes base de Tk no usen cursivas (slant='roman')."""
+    for nombre_fuente in (
+        "TkDefaultFont",
+        "TkTextFont",
+        "TkMenuFont",
+        "TkHeadingFont",
+    ):
+        try:
+            f = tkfont.nametofont(nombre_fuente, root=root)
+            f.configure(
+                family=FUENTE_FAMILIA,
+                size=TAMANIO_BASE,
+                weight="bold" if nombre_fuente == "TkHeadingFont" else "normal",
+                slant="roman",
+            )
+        except Exception:
+            continue
 
 
 def aplicar_estilos_base(root: tk.Misc) -> None:
@@ -120,9 +143,10 @@ def aplicar_estilos_base(root: tk.Misc) -> None:
     """
     familia_activa = resolver_familia_fuente(root)
     _actualizar_fuentes_globales(familia_activa)
+    _sincronizar_fuentes_tk(root)
 
     style = ttk.Style(root)
-    style.theme_use("clam")  # Permite personalizar colores y estados con claridad
+    style.theme_use("clam")
 
     if isinstance(root, (tk.Tk, tk.Toplevel)):
         root.configure(bg=COLOR_FONDO)
@@ -172,11 +196,12 @@ def aplicar_estilos_base(root: tk.Misc) -> None:
         font=FUENTE_BASE,
     )
 
-    # Campos de entrada (Entry)
+    # Campos de entrada, combos y checks
     style.configure(
         "TEntry",
         fieldbackground="white",
         foreground=COLOR_TEXTO,
+        font=FUENTE_BASE,
         padding=6,
     )
     style.map(
@@ -192,8 +217,21 @@ def aplicar_estilos_base(root: tk.Misc) -> None:
             ("focus", COLOR_BORDE),
         ],
     )
+    style.configure(
+        "TCombobox",
+        fieldbackground="white",
+        foreground=COLOR_TEXTO,
+        font=FUENTE_BASE,
+        padding=4,
+    )
+    style.configure(
+        "TCheckbutton",
+        background=COLOR_FONDO,
+        foreground=COLOR_TEXTO,
+        font=FUENTE_BASE,
+    )
 
-    # Botones (TButton): 12 pt sin negrita, texto negro, normal en yellowgreen y active en lightgreen
+    # Botones (TButton): 12 pt sin negrita ni cursiva
     style.configure(
         "TButton",
         font=FUENTE_BOTON,
@@ -226,7 +264,7 @@ def aplicar_estilos_base(root: tk.Misc) -> None:
         background="white",
         fieldbackground="white",
         foreground=COLOR_TEXTO,
-        rowheight=30,
+        rowheight=ALTO_FILA_TABLA,
         font=FUENTE_BASE,
     )
     style.configure(
@@ -241,3 +279,4 @@ def aplicar_estilos_base(root: tk.Misc) -> None:
         background=[("selected", COLOR_ACCENTO)],
         foreground=[("selected", COLOR_TEXTO)],
     )
+    root.option_add("*TCombobox*Listbox.font", FUENTE_BASE)

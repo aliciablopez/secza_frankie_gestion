@@ -1,446 +1,629 @@
 """
 ===============================================================================
-MÓDULO DE INTERFAZ GRÁFICA: GESTIÓN DE CLIENTES (src/vistas/ui_clientes.py)
+MÓDULO DE VISTAS: INTERFAZ DE CLIENTES (vistas/ui_clientes.py)
 ===============================================================================
-Componente `ttk.Frame` reutilizable para el CRUD de clientes (personas físicas
-con prefijo 20 o 27), búsqueda en vivo, filtro de inactivos, activación/
-desactivación lógica y visualización de cliente frecuente.
+Alta, Listado, Edición y Baja/Reactivación Lógica de clientes (Persona Física).
+- Botonera alineada al patrón del sistema: Guardar, Actualizar, Limpiar, Deshabilitar.
+- Tabla limpia (sin Consumidor Final ni Frecuente; esos datos van a facturación).
+- Orden alfabético por Apellido y Nombre.
+- Tipografía 12 pt sin itálicas en etiquetas, campos de texto, botones y tabla.
 ===============================================================================
 """
 
-from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, cast, Dict, List, Literal, Optional, Tuple
 import tkinter as tk
+from tkinter import font as tkfont
 from tkinter import messagebox, ttk
 
-from dominio.entidades_ventas import (
-    Cliente,
-    es_documento_persona_fisica_valido,
-    limpiar_documento,
-)
+from dominio.entidades_ventas import Cliente
 from infraestructura.repo_ventas import RepositorioVentas
 
+try:
+    from vistas.ui_estilos import aplicar_estilos_base
+except ImportError:
+    try:
+        from vistas.estilos import aplicar_estilos_base
+    except ImportError:
+        aplicar_estilos_base = None
 
-def formatear_documento_cliente(doc_raw: str) -> str:
-    """Formatea CUIL/CUIT de 11 dígitos como XX-XXXXXXXX-X o devuelve dígitos."""
-    digitos = limpiar_documento(doc_raw)
-    if len(digitos) == 11:
-        return f"{digitos[:2]}-{digitos[2:10]}-{digitos[10]}"
-    return digitos
+TAMANIO_FUENTE = 12
+ALTO_FILA_TABLA = 34
+AnchorTk = Literal["nw", "n", "ne", "w", "center", "e", "sw", "s", "se"]
+
+
+def _a_entero_opcional(valor: Any) -> Optional[int]:
+    """Convierte a int de forma segura y tipada, o devuelve None."""
+    if valor is None or isinstance(valor, bool):
+        return None
+    if isinstance(valor, int):
+        return valor
+    if isinstance(valor, str):
+        texto = valor.strip()
+        if not texto:
+            return None
+        try:
+            return int(texto)
+        except ValueError:
+            return None
+    return None
+
+
+def _a_entero_o_cero(valor: Any) -> int:
+    """Convierte a int de forma segura y tipada, o devuelve 0."""
+    convertido = _a_entero_opcional(valor)
+    return convertido if convertido is not None else 0
+
+
+def _clave_alfabetica_fila(fila_info: Dict[str, Any]) -> Tuple[str, str, str]:
+    """Clave de ordenamiento alfabético por Apellidos, Nombres y documento."""
+    cli: Cliente = fila_info["cliente"]
+    apellidos = str(
+        getattr(cli, "apellidos", "") or getattr(cli, "apellido", "") or ""
+    ).strip().lower()
+    nombres = str(
+        getattr(cli, "nombres", "") or getattr(cli, "nombre", "") or ""
+    ).strip().lower()
+    doc = str(
+        getattr(cli, "nro_documento", "")
+        or getattr(cli, "cuit_cliente", "")
+        or getattr(cli, "dni", "")
+        or ""
+    ).strip().lower()
+    return (apellidos, nombres, doc)
 
 
 class InterfazClientes(ttk.Frame):
-    """Vista modular para administrar clientes (exclusivamente personas físicas)."""
-
-    TIPOS_DOC_FISICA = ("CUIL", "CUIT", "DNI", "Pasaporte")
+    """Vista modular para administrar el padrón de clientes (Persona Física)."""
 
     def __init__(self, parent: tk.Misc, *args: Any, **kwargs: Any) -> None:
         super().__init__(parent, *args, **kwargs)
-        self._id_cliente_edicion: Optional[int] = None
-        self._id_persona_edicion: Optional[int] = None
-        self._registros_visibles: Dict[str, Dict[str, Any]] = {}
+        if callable(aplicar_estilos_base):
+            try:
+                aplicar_estilos_base(self.winfo_toplevel())
+            except Exception:
+                pass
 
-        self._var_tipo_doc = tk.StringVar(value="CUIL")
-        self._var_nro_doc = tk.StringVar()
-        self._var_nombres = tk.StringVar()
-        self._var_apellidos = tk.StringVar()
-        self._var_telefono = tk.StringVar()
-        self._var_email = tk.StringVar()
-        self._var_domicilio = tk.StringVar()
-        self._var_ciudad = tk.StringVar()
-        self._var_provincia = tk.StringVar()
-        self._var_cp = tk.StringVar()
-        self._var_activo = tk.BooleanVar(value=True)
+        self.pack(fill="both", expand=True, padx=10, pady=10)
 
-        self._var_busqueda = tk.StringVar()
-        self._var_incluir_inactivos = tk.BooleanVar(value=False)
+        self.cliente_seleccionado_id: Optional[int] = None
+        self.persona_seleccionada_id: Optional[int] = None
+        self.cliente_estado_activo: bool = True
+        self.cliente_es_frecuente_actual: bool = False
+        self.clientes_cache: Dict[str, Dict[str, Any]] = {}
 
-        self._construir_ui()
-        self._refrescar_listado()
+        self.var_documento = tk.StringVar()
+        self.var_nombres = tk.StringVar()
+        self.var_apellidos = tk.StringVar()
+        self.var_telefono = tk.StringVar()
+        self.var_email = tk.StringVar()
+        self.var_direccion = tk.StringVar()
 
-    def _construir_ui(self) -> None:
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(2, weight=1)
+        self.var_busqueda = tk.StringVar()
+        self.var_mostrar_inactivos = tk.BooleanVar(value=False)
 
-        # Encabezado
-        frame_header = ttk.Frame(self, padding=(12, 10, 12, 4))
-        frame_header.grid(row=0, column=0, sticky="ew")
-        ttk.Label(
-            frame_header,
-            text="Gestión de Clientes (Personas Físicas — Prefijos 20 / 27)",
-            font=("Segoe UI", 12, "bold"),
-        ).pack(side="left")
+        self._construir_interfaz()
+        self._configurar_fuentes()
+        self.cargar_tabla_clientes()
 
-        periodo_actual = datetime.now().strftime("%Y-%m")
-        ttk.Label(
-            frame_header,
-            text=f"Período frecuente: {periodo_actual}",
-        ).pack(side="right")
+    def _configurar_fuentes(self) -> None:
+        """
+        Fuerza 12 pt sin itálicas (slant='roman') en fuentes Tk, campos de texto
+        y estilos ttk sin alterar los colores configurados.
+        """
+        top = self.winfo_toplevel()
+        base_font = tkfont.nametofont("TkDefaultFont", root=top)
+        familia_actual = base_font.actual().get("family") or "Segoe UI"
+        if "italic" in str(base_font.actual().get("slant", "")).lower():
+            familia_actual = "Segoe UI"
 
-        # Formulario superior
-        frame_form = ttk.LabelFrame(
-            self, text="Datos del Cliente", padding=(12, 8, 12, 10)
+        fuente_normal = (familia_actual, TAMANIO_FUENTE, "normal")
+        fuente_encabezado = (familia_actual, TAMANIO_FUENTE, "bold")
+
+        for nombre_fuente in tkfont.names(root=top):
+            try:
+                f = tkfont.nametofont(nombre_fuente, root=top)
+                peso = (
+                    "bold"
+                    if nombre_fuente == "TkHeadingFont"
+                    else f.actual().get("weight", "normal")
+                )
+                f.configure(
+                    family=familia_actual,
+                    size=TAMANIO_FUENTE,
+                    weight=peso,
+                    slant="roman",
+                )
+            except Exception:
+                continue
+
+        estilo = ttk.Style(top)
+        estilo.configure(".", font=fuente_normal)
+        estilo.configure("TLabel", font=fuente_normal)
+        estilo.configure("Subtitulo.TLabel", font=fuente_encabezado)
+        estilo.configure("Muted.TLabel", font=fuente_normal)
+        estilo.configure("TButton", font=fuente_normal)
+        estilo.configure("TCheckbutton", font=fuente_normal)
+        estilo.configure("TEntry", font=fuente_normal)
+        estilo.configure("TCombobox", font=fuente_normal)
+        estilo.configure("TLabelframe.Label", font=fuente_encabezado)
+        estilo.configure(
+            "Treeview",
+            font=fuente_normal,
+            rowheight=ALTO_FILA_TABLA,
         )
-        frame_form.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
-        for col in (1, 3, 5):
-            frame_form.columnconfigure(col, weight=1)
-
-        # Fila 0: Tipo Doc, Nro Doc, Nombres, Apellidos
-        ttk.Label(frame_form, text="Tipo Doc:").grid(
-            row=0, column=0, sticky="w", padx=(0, 6), pady=4
-        )
-        combo_tipo = ttk.Combobox(
-            frame_form,
-            textvariable=self._var_tipo_doc,
-            values=self.TIPOS_DOC_FISICA,
-            state="readonly",
-            width=12,
-        )
-        combo_tipo.grid(row=0, column=1, sticky="w", padx=(0, 12), pady=4)
-
-        ttk.Label(frame_form, text="CUIL/CUIT/DNI *:").grid(
-            row=0, column=2, sticky="w", padx=(0, 6), pady=4
-        )
-        ttk.Entry(frame_form, textvariable=self._var_nro_doc, width=22).grid(
-            row=0, column=3, sticky="ew", padx=(0, 12), pady=4
+        estilo.configure(
+            "Treeview.Heading",
+            font=fuente_encabezado,
         )
 
-        ttk.Label(frame_form, text="Nombres *:").grid(
-            row=0, column=4, sticky="w", padx=(0, 6), pady=4
-        )
-        ttk.Entry(frame_form, textvariable=self._var_nombres, width=24).grid(
-            row=0, column=5, sticky="ew", pady=4
-        )
+        top.option_add("*Font", fuente_normal)
+        top.option_add("*Entry.font", fuente_normal)
+        top.option_add("*TEntry*Font", fuente_normal)
+        top.option_add("*TCombobox*Listbox.font", fuente_normal)
 
-        # Fila 1: Apellidos, Teléfono, Email
-        ttk.Label(frame_form, text="Apellidos *:").grid(
-            row=1, column=0, sticky="w", padx=(0, 6), pady=4
+        self._aplicar_fuente_recursiva(self, fuente_normal)
+
+    def _aplicar_fuente_recursiva(
+        self, widget: tk.Misc, fuente: Tuple[str, int, str]
+    ) -> None:
+        """Asegura fuente normal sin itálica en widgets Entry / Text de Tk si existen."""
+        for hijo in widget.winfo_children():
+            if isinstance(hijo, (tk.Entry, tk.Text)):
+                try:
+                    hijo.configure(font=fuente)
+                except Exception:
+                    pass
+            if isinstance(hijo, tk.Misc):
+                self._aplicar_fuente_recursiva(hijo, fuente)
+
+    def _construir_interfaz(self) -> None:
+        # 1. Formulario de Datos (2 columnas)
+        frame_form = ttk.LabelFrame(self, text=" Datos del Cliente ", padding=15)
+        frame_form.pack(fill="x", padx=5, pady=5)
+        frame_form.columnconfigure(1, weight=1)
+        frame_form.columnconfigure(3, weight=1)
+
+        # Fila 0: DNI / CUIT | Teléfono
+        ttk.Label(frame_form, text="DNI / CUIT *:").grid(
+            row=0, column=0, sticky="w", padx=6, pady=6
         )
-        ttk.Entry(frame_form, textvariable=self._var_apellidos, width=22).grid(
-            row=1, column=1, sticky="ew", padx=(0, 12), pady=4
+        ttk.Entry(frame_form, textvariable=self.var_documento).grid(
+            row=0, column=1, sticky="ew", padx=6, pady=6
         )
 
         ttk.Label(frame_form, text="Teléfono:").grid(
-            row=1, column=2, sticky="w", padx=(0, 6), pady=4
+            row=0, column=2, sticky="w", padx=6, pady=6
         )
-        ttk.Entry(frame_form, textvariable=self._var_telefono, width=20).grid(
-            row=1, column=3, sticky="ew", padx=(0, 12), pady=4
+        ttk.Entry(frame_form, textvariable=self.var_telefono).grid(
+            row=0, column=3, sticky="ew", padx=6, pady=6
         )
 
+        # Fila 1: Nombres | Apellidos
+        ttk.Label(frame_form, text="Nombres *:").grid(
+            row=1, column=0, sticky="w", padx=6, pady=6
+        )
+        ttk.Entry(frame_form, textvariable=self.var_nombres).grid(
+            row=1, column=1, sticky="ew", padx=6, pady=6
+        )
+
+        ttk.Label(frame_form, text="Apellidos *:").grid(
+            row=1, column=2, sticky="w", padx=6, pady=6
+        )
+        ttk.Entry(frame_form, textvariable=self.var_apellidos).grid(
+            row=1, column=3, sticky="ew", padx=6, pady=6
+        )
+
+        # Fila 2: Email | Dirección
         ttk.Label(frame_form, text="Email:").grid(
-            row=1, column=4, sticky="w", padx=(0, 6), pady=4
+            row=2, column=0, sticky="w", padx=6, pady=6
         )
-        ttk.Entry(frame_form, textvariable=self._var_email, width=24).grid(
-            row=1, column=5, sticky="ew", pady=4
-        )
-
-        # Fila 2: Domicilio, Ciudad, Provincia / CP
-        ttk.Label(frame_form, text="Domicilio:").grid(
-            row=2, column=0, sticky="w", padx=(0, 6), pady=4
-        )
-        ttk.Entry(frame_form, textvariable=self._var_domicilio, width=24).grid(
-            row=2, column=1, sticky="ew", padx=(0, 12), pady=4
+        ttk.Entry(frame_form, textvariable=self.var_email).grid(
+            row=2, column=1, sticky="ew", padx=6, pady=6
         )
 
-        ttk.Label(frame_form, text="Ciudad:").grid(
-            row=2, column=2, sticky="w", padx=(0, 6), pady=4
+        ttk.Label(frame_form, text="Dirección:").grid(
+            row=2, column=2, sticky="w", padx=6, pady=6
         )
-        ttk.Entry(frame_form, textvariable=self._var_ciudad, width=20).grid(
-            row=2, column=3, sticky="ew", padx=(0, 12), pady=4
-        )
-
-        frame_prov_cp = ttk.Frame(frame_form)
-        frame_prov_cp.grid(row=2, column=4, columnspan=2, sticky="ew", pady=4)
-        frame_prov_cp.columnconfigure(1, weight=1)
-        ttk.Label(frame_prov_cp, text="Provincia:").grid(
-            row=0, column=0, sticky="w", padx=(0, 4)
-        )
-        ttk.Entry(frame_prov_cp, textvariable=self._var_provincia, width=16).grid(
-            row=0, column=1, sticky="ew", padx=(0, 8)
-        )
-        ttk.Label(frame_prov_cp, text="CP:").grid(
-            row=0, column=2, sticky="w", padx=(0, 4)
-        )
-        ttk.Entry(frame_prov_cp, textvariable=self._var_cp, width=8).grid(
-            row=0, column=3, sticky="w"
+        ttk.Entry(frame_form, textvariable=self.var_direccion).grid(
+            row=2, column=3, sticky="ew", padx=6, pady=6
         )
 
-        # Fila 3: Estado y botonera de formulario
-        frame_acciones_form = ttk.Frame(frame_form)
-        frame_acciones_form.grid(
-            row=3, column=0, columnspan=6, sticky="ew", pady=(8, 0)
+        # Fila 3: Botonera (Guardar, Actualizar, Limpiar, Deshabilitar)
+        frame_botones = ttk.Frame(frame_form)
+        frame_botones.grid(row=3, column=0, columnspan=4, sticky="e", pady=(10, 4))
+
+        self.btn_guardar = ttk.Button(
+            frame_botones,
+            text="Guardar",
+            command=self.guardar_cliente,
         )
+        self.btn_guardar.pack(side="left", padx=6)
 
-        ttk.Checkbutton(
-            frame_acciones_form,
-            text="Cliente activo",
-            variable=self._var_activo,
-        ).pack(side="left", padx=(0, 16))
-
-        ttk.Button(
-            frame_acciones_form,
-            text="Guardar Cliente",
-            command=self._guardar_cliente,
-        ).pack(side="left", padx=(0, 6))
-
-        ttk.Button(
-            frame_acciones_form,
-            text="Limpiar / Nuevo",
-            command=self._limpiar_formulario,
-        ).pack(side="left", padx=(0, 6))
-
-        self._btn_toggle_estado = ttk.Button(
-            frame_acciones_form,
-            text="Desactivar / Activar",
-            command=self._alternar_estado_seleccionado,
-        )
-        self._btn_toggle_estado.pack(side="right")
-
-        # Bloque inferior: búsqueda, filtros y grilla con scrollbars en grid
-        frame_lista = ttk.LabelFrame(
-            self, text="Padrón de Clientes", padding=(12, 8, 12, 12)
-        )
-        frame_lista.grid(row=2, column=0, sticky="nsew", padx=12, pady=(0, 12))
-        frame_lista.columnconfigure(0, weight=1)
-        frame_lista.rowconfigure(1, weight=1)
-
-        frame_filtros = ttk.Frame(frame_lista)
-        frame_filtros.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        frame_filtros.columnconfigure(1, weight=1)
-
-        ttk.Label(frame_filtros, text="Buscar:").grid(
-            row=0, column=0, sticky="w", padx=(0, 6)
-        )
-        entry_buscar = ttk.Entry(frame_filtros, textvariable=self._var_busqueda)
-        entry_buscar.grid(row=0, column=1, sticky="ew", padx=(0, 10))
-        entry_buscar.bind("<KeyRelease>", lambda _e: self._refrescar_listado())
-
-        ttk.Checkbutton(
-            frame_filtros,
-            text="Mostrar inactivos",
-            variable=self._var_incluir_inactivos,
-            command=self._refrescar_listado,
-        ).grid(row=0, column=2, sticky="e", padx=(0, 8))
-
-        ttk.Button(
-            frame_filtros,
+        self.btn_actualizar = ttk.Button(
+            frame_botones,
             text="Actualizar",
-            command=self._refrescar_listado,
-        ).grid(row=0, column=3, sticky="e")
+            command=self.actualizar_cliente,
+            state="disabled",
+        )
+        self.btn_actualizar.pack(side="left", padx=6)
 
-        # Contenedor exclusivo para Treeview + scrollbars via grid
-        frame_grid = ttk.Frame(frame_lista)
-        frame_grid.grid(row=1, column=0, sticky="nsew")
-        frame_grid.columnconfigure(0, weight=1)
-        frame_grid.rowconfigure(0, weight=1)
+        ttk.Button(
+            frame_botones,
+            text="Limpiar",
+            command=self.limpiar_formulario,
+        ).pack(side="left", padx=6)
+
+        self.btn_toggle_estado = ttk.Button(
+            frame_botones,
+            text="Deshabilitar",
+            command=self.toggle_estado_cliente,
+            state="disabled",
+        )
+        self.btn_toggle_estado.pack(side="left", padx=6)
+
+        # 2. Listado (Tabla Treeview limpia y ordenada alfabéticamente)
+        frame_tabla = ttk.LabelFrame(
+            self,
+            text=" Padrón de Clientes Registrados (Seleccione una fila para editar o deshabilitar) ",
+            padding=15,
+        )
+        frame_tabla.pack(fill="both", expand=True, padx=5, pady=5)
+
+        frame_busqueda = ttk.Frame(frame_tabla)
+        frame_busqueda.pack(fill="x", pady=(0, 8))
+
+        ttk.Label(frame_busqueda, text="Buscar cliente:").pack(side="left", padx=(0, 6))
+        entry_buscar = ttk.Entry(frame_busqueda, textvariable=self.var_busqueda)
+        entry_buscar.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        entry_buscar.bind("<KeyRelease>", lambda _e: self.cargar_tabla_clientes())
+
+        ttk.Checkbutton(
+            frame_busqueda,
+            text="Mostrar inactivos",
+            variable=self.var_mostrar_inactivos,
+            command=self.cargar_tabla_clientes,
+        ).pack(side="right")
+
+        frame_grilla = ttk.Frame(frame_tabla)
+        frame_grilla.pack(fill="both", expand=True)
+        frame_grilla.rowconfigure(0, weight=1)
+        frame_grilla.rowconfigure(1, weight=0)
+        frame_grilla.columnconfigure(0, weight=1)
+        frame_grilla.columnconfigure(1, weight=0)
 
         columnas = (
             "id",
             "documento",
-            "nombre",
+            "nombre_completo",
             "telefono",
             "email",
-            "compras_mes",
-            "frecuente",
+            "direccion",
             "estado",
         )
-        self._tree = ttk.Treeview(
-            frame_grid, columns=columnas, show="headings", selectmode="browse"
+        self.tabla = ttk.Treeview(
+            frame_grilla,
+            columns=columnas,
+            show="headings",
+            selectmode="browse",
+            height=8,
         )
-        encabezados = {
-            "id": ("ID", 55),
-            "documento": ("Documento", 135),
-            "nombre": ("Apellido y Nombre", 220),
-            "telefono": ("Teléfono", 120),
-            "email": ("Email", 190),
-            "compras_mes": ("Compras/Mes", 95),
-            "frecuente": ("Frecuente", 95),
-            "estado": ("Estado", 85),
+
+        encabezados: Dict[str, Tuple[str, int, AnchorTk]] = {
+            "id": ("ID", 60, "center"),
+            "documento": ("DNI / CUIT", 155, "center"),
+            "nombre_completo": ("Apellido y Nombre", 250, "w"),
+            "telefono": ("Teléfono", 150, "center"),
+            "email": ("Email", 220, "w"),
+            "direccion": ("Dirección", 240, "w"),
+            "estado": ("Estado", 105, "center"),
         }
-        for col, (titulo, ancho) in encabezados.items():
-            self._tree.heading(col, text=titulo)
-            ancor = (
-                "center"
-                if col in ("id", "compras_mes", "frecuente", "estado")
-                else "w"
-            )
-            self._tree.column(col, width=ancho, anchor=ancor)
+        for col, (titulo, ancho, ancla) in encabezados.items():
+            self.tabla.heading(col, text=titulo)
+            self.tabla.column(col, width=ancho, anchor=cast(AnchorTk, ancla))
 
         scroll_y = ttk.Scrollbar(
-            frame_grid, orient="vertical", command=self._tree.yview
+            frame_grilla, orient="vertical", command=self.tabla.yview
         )
         scroll_x = ttk.Scrollbar(
-            frame_grid, orient="horizontal", command=self._tree.xview
+            frame_grilla, orient="horizontal", command=self.tabla.xview
         )
-        self._tree.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+        self.tabla.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
 
-        self._tree.grid(row=0, column=0, sticky="nsew")
+        self.tabla.grid(row=0, column=0, sticky="nsew")
         scroll_y.grid(row=0, column=1, sticky="ns")
         scroll_x.grid(row=1, column=0, sticky="ew")
 
-        self._tree.bind("<<TreeviewSelect>>", self._cargar_seleccion_en_formulario)
+        self.tabla.bind("<<TreeviewSelect>>", self._al_seleccionar_fila)
 
-    def _limpiar_formulario(self) -> None:
-        self._id_cliente_edicion = None
-        self._id_persona_edicion = None
-        self._var_tipo_doc.set("CUIL")
-        self._var_nro_doc.set("")
-        self._var_nombres.set("")
-        self._var_apellidos.set("")
-        self._var_telefono.set("")
-        self._var_email.set("")
-        self._var_domicilio.set("")
-        self._var_ciudad.set("")
-        self._var_provincia.set("")
-        self._var_cp.set("")
-        self._var_activo.set(True)
-        self._tree.selection_remove(self._tree.selection())
+    def _obtener_registros_desde_repo(self) -> List[Dict[str, Any]]:
+        """Consulta clientes en RepositorioVentas y normaliza la estructura."""
+        criterio = self.var_busqueda.get().strip()
+        incluir_inactivos = bool(self.var_mostrar_inactivos.get())
 
-    def _guardar_cliente(self) -> None:
-        nro_doc = self._var_nro_doc.get().strip()
-        nombres = self._var_nombres.get().strip()
-        apellidos = self._var_apellidos.get().strip()
+        raw_items = RepositorioVentas.listar_clientes(
+            criterio_busqueda=criterio,
+            incluir_inactivos=incluir_inactivos,
+        )
 
-        if not nro_doc or not nombres or not apellidos:
+        normalizados: List[Dict[str, Any]] = []
+        for item in raw_items:
+            if isinstance(item, dict) and "cliente" in item:
+                normalizados.append(
+                    {
+                        "cliente": item["cliente"],
+                        "compras_mes": _a_entero_o_cero(item.get("compras_mes", 0)),
+                        "es_frecuente": bool(item.get("es_frecuente", False)),
+                    }
+                )
+            elif isinstance(item, Cliente):
+                normalizados.append(
+                    {
+                        "cliente": item,
+                        "compras_mes": 0,
+                        "es_frecuente": False,
+                    }
+                )
+        return normalizados
+
+    def cargar_tabla_clientes(self) -> None:
+        """Carga, filtra y ordena alfabéticamente los clientes en la tabla."""
+        for fila in self.tabla.get_children():
+            self.tabla.delete(fila)
+        self.clientes_cache.clear()
+
+        try:
+            registros = self._obtener_registros_desde_repo()
+        except Exception as exc:
+            messagebox.showerror(
+                "Error al listar clientes",
+                str(exc),
+                parent=self,
+            )
+            return
+
+        registros_ordenados = sorted(registros, key=_clave_alfabetica_fila)
+        mostrar_inactivos = bool(self.var_mostrar_inactivos.get())
+
+        for reg in registros_ordenados:
+            cli: Cliente = reg["cliente"]
+            activo = bool(getattr(cli, "activo", True))
+            if not mostrar_inactivos and not activo:
+                continue
+
+            doc = str(
+                getattr(cli, "nro_documento", "")
+                or getattr(cli, "cuit_cliente", "")
+                or getattr(cli, "dni", "")
+                or ""
+            )
+            apellidos = str(
+                getattr(cli, "apellidos", "") or getattr(cli, "apellido", "") or ""
+            )
+            nombres = str(
+                getattr(cli, "nombres", "") or getattr(cli, "nombre", "") or ""
+            )
+            nombre_completo = f"{apellidos}, {nombres}".strip(", ") or "-"
+            telefono = str(getattr(cli, "telefono", "") or "")
+            email = str(getattr(cli, "email", "") or "")
+            direccion = str(
+                getattr(cli, "domicilio", "") or getattr(cli, "direccion", "") or ""
+            )
+
+            id_cli = getattr(cli, "id_cliente", None)
+            if id_cli is None:
+                id_cli = getattr(cli, "id", "")
+
+            iid = self.tabla.insert(
+                "",
+                "end",
+                values=(
+                    id_cli if id_cli is not None else "-",
+                    doc or "-",
+                    nombre_completo,
+                    telefono or "-",
+                    email or "-",
+                    direccion or "-",
+                    "Activo" if activo else "Inactivo",
+                ),
+            )
+            self.clientes_cache[iid] = reg
+
+    def _construir_entidad_cliente(
+        self,
+        id_cliente: Optional[int],
+        id_persona: Optional[int],
+        activo: bool,
+    ) -> Optional[Cliente]:
+        """Valida los campos del formulario y construye la entidad Cliente."""
+        doc = self.var_documento.get().strip()
+        nombres = self.var_nombres.get().strip()
+        apellidos = self.var_apellidos.get().strip()
+
+        if not doc or not nombres or not apellidos:
             messagebox.showwarning(
                 "Datos incompletos",
-                "Completá Documento (prefijo 20 o 27), Nombres y Apellidos.",
+                "Completá DNI / CUIT, Nombres y Apellidos.",
+                parent=self,
             )
-            return
+            return None
 
-        if not es_documento_persona_fisica_valido(nro_doc):
-            messagebox.showwarning(
-                "Documento no válido para Persona Física",
-                "Para clientes (Persona Física) ingresá un CUIL/CUIT de 11 dígitos "
-                "comenzado con 20 o 27, o un DNI válido.",
-            )
-            return
+        direccion = self.var_direccion.get().strip()
+        telefono = self.var_telefono.get().strip()
+        email = self.var_email.get().strip()
 
         cliente = Cliente(
-            id_cliente=self._id_cliente_edicion,
-            id_persona=self._id_persona_edicion,
-            tipo_documento=self._var_tipo_doc.get().strip(),
-            nro_documento=limpiar_documento(nro_doc),
             nombres=nombres,
             apellidos=apellidos,
-            telefono=self._var_telefono.get().strip(),
-            email=self._var_email.get().strip(),
-            domicilio=self._var_domicilio.get().strip(),
-            ciudad=self._var_ciudad.get().strip(),
-            provincia=self._var_provincia.get().strip(),
-            codigo_postal=self._var_cp.get().strip(),
-            activo=bool(self._var_activo.get()),
+            nro_documento=doc,
+            email=email,
+            telefono=telefono,
+            id_cliente=id_cliente,
+            id_persona=id_persona,
         )
+        setattr(cliente, "cuit_cliente", doc)
+        setattr(cliente, "domicilio", direccion)
+        setattr(cliente, "activo", activo)
+        return cliente
+
+    def guardar_cliente(self) -> None:
+        """Registra un nuevo cliente (Persona Física) y refresca el padrón."""
+        cliente = self._construir_entidad_cliente(
+            id_cliente=None,
+            id_persona=None,
+            activo=True,
+        )
+        if cliente is None:
+            return
 
         try:
             RepositorioVentas.guardar_cliente(cliente)
+            self.var_mostrar_inactivos.set(False)
+            self.var_busqueda.set("")
+            self.limpiar_formulario()
+            self.cargar_tabla_clientes()
             messagebox.showinfo(
                 "Guardado",
-                "Cliente guardado correctamente en el padrón.",
+                f"Cliente registrado correctamente (ID #{cliente.id_cliente}).",
+                parent=self,
             )
-            self._limpiar_formulario()
-            self._refrescar_listado()
         except Exception as exc:
-            messagebox.showerror("Error al guardar cliente", str(exc))
+            messagebox.showerror(
+                "Error al guardar cliente",
+                str(exc),
+                parent=self,
+            )
 
-    def _cargar_seleccion_en_formulario(self, _event: Any = None) -> None:
-        seleccion = self._tree.selection()
-        if not seleccion:
-            return
-        item_id = seleccion[0]
-        data = self._registros_visibles.get(item_id)
-        if not data:
-            return
-
-        cli: Cliente = data["cliente"]
-        self._id_cliente_edicion = cli.id_cliente
-        self._id_persona_edicion = cli.id_persona
-        self._var_tipo_doc.set(
-            cli.tipo_documento.capitalize()
-            if cli.tipo_documento.lower() == "pasaporte"
-            else cli.tipo_documento.upper()
-        )
-        self._var_nro_doc.set(formatear_documento_cliente(cli.nro_documento))
-        self._var_nombres.set(cli.nombres)
-        self._var_apellidos.set(cli.apellidos)
-        self._var_telefono.set(cli.telefono)
-        self._var_email.set(cli.email)
-        self._var_domicilio.set(cli.domicilio)
-        self._var_ciudad.set(cli.ciudad)
-        self._var_provincia.set(cli.provincia)
-        self._var_cp.set(cli.codigo_postal)
-        self._var_activo.set(cli.activo)
-
-    def _alternar_estado_seleccionado(self) -> None:
-        seleccion = self._tree.selection()
-        if not seleccion:
-            messagebox.showinfo(
-                "Selección requerida",
-                "Seleccioná un cliente en la tabla para activar o desactivar.",
+    def actualizar_cliente(self) -> None:
+        """Actualiza los datos del cliente seleccionado en la tabla."""
+        if self.cliente_seleccionado_id is None:
+            messagebox.showwarning(
+                "Sin selección",
+                "Seleccioná un cliente del padrón para actualizar.",
+                parent=self,
             )
             return
 
-        data = self._registros_visibles.get(seleccion[0])
-        if not data:
-            return
-        cli: Cliente = data["cliente"]
-        if cli.id_cliente is None:
+        cliente = self._construir_entidad_cliente(
+            id_cliente=self.cliente_seleccionado_id,
+            id_persona=self.persona_seleccionada_id,
+            activo=self.cliente_estado_activo,
+        )
+        if cliente is None:
             return
 
-        nuevo_estado = not cli.activo
-        accion = "activar" if nuevo_estado else "desactivar"
+        try:
+            RepositorioVentas.guardar_cliente(cliente)
+            self.limpiar_formulario()
+            self.cargar_tabla_clientes()
+            messagebox.showinfo(
+                "Actualizado",
+                "Cliente actualizado correctamente.",
+                parent=self,
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Error al actualizar cliente",
+                str(exc),
+                parent=self,
+            )
+
+    def toggle_estado_cliente(self) -> None:
+        """Activa o desactiva lógicamente al cliente seleccionado."""
+        if self.cliente_seleccionado_id is None:
+            return
+
+        nuevo_estado = not self.cliente_estado_activo
+        accion = "reactivar" if nuevo_estado else "deshabilitar"
         if not messagebox.askyesno(
             "Confirmar cambio de estado",
-            f"¿Deseás {accion} a '{cli.nombre_completo}'?",
+            f"¿Deseás {accion} al cliente '{self.var_apellidos.get().strip()}, {self.var_nombres.get().strip()}'?",
+            parent=self,
         ):
             return
 
         try:
-            RepositorioVentas.cambiar_estado_cliente(cli.id_cliente, nuevo_estado)
-            self._limpiar_formulario()
-            self._refrescar_listado()
-        except Exception as exc:
-            messagebox.showerror("Error al actualizar estado", str(exc))
-
-    def _refrescar_listado(self) -> None:
-        for fila in self._tree.get_children():
-            self._tree.delete(fila)
-        self._registros_visibles.clear()
-
-        try:
-            filas = RepositorioVentas.listar_clientes(
-                criterio_busqueda=self._var_busqueda.get(),
-                incluir_inactivos=bool(self._var_incluir_inactivos.get()),
+            RepositorioVentas.cambiar_estado_cliente(
+                self.cliente_seleccionado_id, nuevo_estado
             )
+            self.limpiar_formulario()
+            self.cargar_tabla_clientes()
         except Exception as exc:
-            messagebox.showerror("Error al listar clientes", str(exc))
+            messagebox.showerror(
+                "Error al actualizar estado",
+                str(exc),
+                parent=self,
+            )
+
+    def limpiar_formulario(self) -> None:
+        """Restablece el formulario para un nuevo cliente."""
+        self.cliente_seleccionado_id = None
+        self.persona_seleccionada_id = None
+        self.cliente_estado_activo = True
+        self.cliente_es_frecuente_actual = False
+        self.var_documento.set("")
+        self.var_nombres.set("")
+        self.var_apellidos.set("")
+        self.var_telefono.set("")
+        self.var_email.set("")
+        self.var_direccion.set("")
+        self.btn_guardar.config(state="normal")
+        self.btn_actualizar.config(state="disabled")
+        self.btn_toggle_estado.config(text="Deshabilitar", state="disabled")
+        if self.tabla.selection():
+            self.tabla.selection_remove(self.tabla.selection())
+
+    def _al_seleccionar_fila(self, _event: Any = None) -> None:
+        """Carga el cliente seleccionado en el formulario."""
+        seleccion = self.tabla.selection()
+        if not seleccion:
+            return
+        reg = self.clientes_cache.get(seleccion[0])
+        if not reg:
             return
 
-        for reg in filas:
-            cli: Cliente = reg["cliente"]
-            compras_mes: int = int(reg["compras_mes"])
-            es_frecuente: bool = bool(reg["es_frecuente"])
-            iid = self._tree.insert(
-                "",
-                "end",
-                values=(
-                    cli.id_cliente,
-                    formatear_documento_cliente(cli.nro_documento),
-                    cli.nombre_completo,
-                    cli.telefono,
-                    cli.email,
-                    compras_mes,
-                    "Sí" if es_frecuente else "No",
-                    "Activo" if cli.activo else "Inactivo",
-                ),
-            )
-            self._registros_visibles[iid] = reg
+        cli: Cliente = reg["cliente"]
+        self.cliente_seleccionado_id = _a_entero_opcional(
+            getattr(cli, "id_cliente", None)
+        )
+        self.persona_seleccionada_id = _a_entero_opcional(
+            getattr(cli, "id_persona", None)
+        )
+        self.cliente_estado_activo = bool(getattr(cli, "activo", True))
+        self.cliente_es_frecuente_actual = bool(reg.get("es_frecuente", False))
+
+        doc = str(
+            getattr(cli, "nro_documento", "")
+            or getattr(cli, "cuit_cliente", "")
+            or getattr(cli, "dni", "")
+            or ""
+        )
+        nombres = str(
+            getattr(cli, "nombres", "") or getattr(cli, "nombre", "") or ""
+        )
+        apellidos = str(
+            getattr(cli, "apellidos", "") or getattr(cli, "apellido", "") or ""
+        )
+        direccion = str(
+            getattr(cli, "domicilio", "") or getattr(cli, "direccion", "") or ""
+        )
+
+        self.var_documento.set(doc)
+        self.var_nombres.set(nombres)
+        self.var_apellidos.set(apellidos)
+        self.var_telefono.set(str(getattr(cli, "telefono", "") or ""))
+        self.var_email.set(str(getattr(cli, "email", "") or ""))
+        self.var_direccion.set(direccion)
+
+        self.btn_actualizar.config(state="normal")
+        self.btn_toggle_estado.config(
+            state="normal",
+            text="Reactivar" if not self.cliente_estado_activo else "Deshabilitar",
+        )
 
 
 if __name__ == "__main__":
-    ventana_prueba = tk.Tk()
-    ventana_prueba.title("Prueba - Vista Clientes")
-    ventana_prueba.geometry("980x620")
-    vista = InterfazClientes(ventana_prueba)
-    vista.pack(fill="both", expand=True)
-    ventana_prueba.mainloop()
+    root = tk.Tk()
+    root.title("Frankie Gestor - Gestión Clientes")
+    root.geometry("1180x740")
+    InterfazClientes(root)
+    root.mainloop()

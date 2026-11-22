@@ -1,57 +1,179 @@
 """
-Script de Inicialización: Carga el esquema oficial (esquema.sql)
-en la base de datos SQLite de la carpeta 'db/' de forma automatizada.
+===============================================================================
+SCRIPT DE INICIALIZACIÓN DE BASE DE DATOS (inicializar_db.py)
+===============================================================================
+Aplica el esquema relacional SQLite (`esquema.sql`), habilita claves foráneas,
+garantiza columnas clave ante bases preexistentes y verifica las tablas y
+relaciones del sistema.
+===============================================================================
 """
+
+import argparse
 from pathlib import Path
 import sqlite3
+import sys
+
+RUTA_BASE = Path(__file__).resolve().parent
+
+RUTAS_ESQUEMA_CANDIDATAS = [
+    RUTA_BASE / "esquema.sql",
+    RUTA_BASE / "db" / "esquema.sql",
+    RUTA_BASE / "infraestructura" / "esquema.sql",
+]
+
+RUTAS_DB_CANDIDATAS = [
+    RUTA_BASE / "db" / "frankie_gestor.db",
+    RUTA_BASE / "frankie_gestor.db",
+]
 
 
-def inicializar_base():
-    raiz = Path(__file__).resolve().parent
+def localizar_esquema(ruta_explicitada: str | None = None) -> Path:
+    """Devuelve la ruta al archivo esquema.sql."""
+    if ruta_explicitada:
+        ruta = Path(ruta_explicitada).resolve()
+        if not ruta.exists():
+            raise FileNotFoundError(f"No se encontró el esquema en: {ruta}")
+        return ruta
 
-    # Ruta exacta que utiliza la aplicación (carpeta 'db/frankie_gestor.db')
-    ruta_db_dir = raiz / "db"
-    ruta_db_dir.mkdir(parents=True, exist_ok=True)
-    ruta_db = ruta_db_dir / "frankie_gestor.db"
+    for candidata in RUTAS_ESQUEMA_CANDIDATAS:
+        if candidata.exists():
+            return candidata
 
-    # Buscar el archivo esquema.sql en la raíz o dentro de la carpeta db
-    ruta_esquema = raiz / "esquema.sql"
-    if not ruta_esquema.exists():
-        ruta_esquema = raiz / "db" / "esquema.sql"
+    raise FileNotFoundError(
+        "No se encontró 'esquema.sql'. Colocalo en la raíz del proyecto o indicá --esquema."
+    )
 
-    print(f"🔄 Conectando y creando tablas en: {ruta_db}")
 
-    if not ruta_esquema.exists():
-        print("❌ Error crítico: No se encuentra el archivo 'esquema.sql' en el proyecto.")
-        return
+def localizar_db(ruta_explicitada: str | None = None) -> Path:
+    """Devuelve la ruta destino de la base de datos SQLite."""
+    if ruta_explicitada:
+        return Path(ruta_explicitada).resolve()
 
-    with sqlite3.connect(str(ruta_db)) as conexion:
-        conexion.execute("PRAGMA foreign_keys = ON;")
+    for candidata in RUTAS_DB_CANDIDATAS:
+        if candidata.exists():
+            return candidata
 
-        with open(ruta_esquema, "r", encoding="utf-8") as f:
-            script_sql = f.read()
+    return RUTAS_DB_CANDIDATAS[0]
 
-        conexion.executescript(script_sql)
 
-        # 🛡️ ASEGURAR COLUMNA ACTIVO EN PROVEEDORES Y PRODUCTOS
-        cursor = conexion.cursor()
+def _columnas_tabla(conn: sqlite3.Connection, tabla: str) -> set[str]:
+    """Obtiene los nombres de columnas actuales de una tabla."""
+    filas = conn.execute(f"PRAGMA table_info({tabla});").fetchall()
+    return {fila[1] for fila in filas}
 
-        cursor.execute("PRAGMA table_info(proveedores);")
-        cols_prov = [col[1] for col in cursor.fetchall()]
+
+def _asegurar_compatibilidad_columnas(conn: sqlite3.Connection) -> None:
+    """
+    Asegura columnas incorporadas en iteraciones recientes si la tabla ya existía
+    de una versión anterior en la misma base de datos.
+    """
+    tablas_existentes = {
+        fila[0]
+        for fila in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table';"
+        ).fetchall()
+    }
+
+    if "proveedores" in tablas_existentes:
+        cols_prov = _columnas_tabla(conn, "proveedores")
+        if "contacto_secundario" not in cols_prov:
+            conn.execute(
+                "ALTER TABLE proveedores ADD COLUMN contacto_secundario TEXT;"
+            )
         if "activo" not in cols_prov:
-            cursor.execute("ALTER TABLE proveedores ADD COLUMN activo INTEGER DEFAULT 1;")
-            print("🔧 [Actualización] Se añadió la columna 'activo' a la tabla proveedores.")
+            conn.execute(
+                "ALTER TABLE proveedores ADD COLUMN activo INTEGER NOT NULL DEFAULT 1;"
+            )
 
-        cursor.execute("PRAGMA table_info(productos);")
-        cols_prod = [col[1] for col in cursor.fetchall()]
+    if "productos" in tablas_existentes:
+        cols_prod = _columnas_tabla(conn, "productos")
         if "activo" not in cols_prod:
-            cursor.execute("ALTER TABLE productos ADD COLUMN activo INTEGER DEFAULT 1;")
-            print("🔧 [Actualización] Se añadió la columna 'activo' a la tabla productos.")
+            conn.execute(
+                "ALTER TABLE productos ADD COLUMN activo INTEGER NOT NULL DEFAULT 1;"
+            )
 
-        conexion.commit()
 
-    print("✅ ¡Base de datos inicializada y esquema aplicado con éxito en 'db/frankie_gestor.db'!")
+def inicializar_base_datos(
+    ruta_db: Path,
+    ruta_esquema: Path,
+    reiniciar: bool = False,
+) -> None:
+    """Crea o actualiza la base de datos a partir de esquema.sql."""
+    sql_esquema = ruta_esquema.read_text(encoding="utf-8")
+
+    ruta_db.parent.mkdir(parents=True, exist_ok=True)
+    if reiniciar and ruta_db.exists():
+        ruta_db.unlink()
+
+    with sqlite3.connect(str(ruta_db)) as conn:
+        conn.execute("PRAGMA foreign_keys = ON;")
+        conn.executescript(sql_esquema)
+        _asegurar_compatibilidad_columnas(conn)
+        conn.commit()
+
+        check_fk = conn.execute("PRAGMA foreign_key_check;").fetchall()
+        if check_fk:
+            raise sqlite3.IntegrityError(
+                f"Se detectaron violaciones de claves foráneas: {check_fk}"
+            )
+
+        resumen_prov = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS total_proveedores,
+                SUM(CASE WHEN activo = 1 THEN 1 ELSE 0 END) AS activos
+            FROM proveedores;
+            """
+        ).fetchone()
+        fks_prov = conn.execute("PRAGMA foreign_key_list(proveedores);").fetchall()
+
+    print(f"[OK] Base de datos inicializada en: {ruta_db}")
+    print(f"[OK] Esquema aplicado desde: {ruta_esquema}")
+    print(
+        f"[OK] Tabla 'proveedores' lista | Total: {resumen_prov[0]} | "
+        f"Activos: {resumen_prov[1] or 0} | FKs: {len(fks_prov)}"
+    )
+
+
+def parsear_argumentos() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Inicializa o actualiza la base de datos SQLite de Frankie Gestor."
+    )
+    parser.add_argument(
+        "--db",
+        type=str,
+        default=None,
+        help="Ruta al archivo .db (por defecto: db/frankie_gestor.db).",
+    )
+    parser.add_argument(
+        "--esquema",
+        type=str,
+        default=None,
+        help="Ruta al archivo esquema.sql (por defecto: esquema.sql).",
+    )
+    parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="Elimina el archivo .db previo antes de crearlo desde cero.",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parsear_argumentos()
+    try:
+        ruta_esquema = localizar_esquema(args.esquema)
+        ruta_db = localizar_db(args.db)
+        inicializar_base_datos(
+            ruta_db=ruta_db,
+            ruta_esquema=ruta_esquema,
+            reiniciar=args.reset,
+        )
+        return 0
+    except Exception as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
-    inicializar_base()
+    raise SystemExit(main())

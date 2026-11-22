@@ -6,8 +6,9 @@ Orquestador visual principal con menú lateral, control RBAC y área de trabajo.
 ===============================================================================
 """
 
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Tuple
 import tkinter as tk
+from tkinter import font as tkfont
 from tkinter import messagebox, ttk
 
 from controladores.controlador_core import ControladorCore
@@ -38,6 +39,23 @@ try:
 except ImportError:
     InterfazClientes = None
 
+try:
+    from vistas.ui_facturacion import InterfazFacturacion
+except ImportError:
+    InterfazFacturacion = None
+
+
+def _fuente_bold_italic(fuente_ref: Any) -> Tuple[str, int, str]:
+    """Construye una tupla de fuente en negrita e itálica a partir de FUENTE_BASE."""
+    familia = "Segoe UI"
+    tamanio = 12
+    if isinstance(fuente_ref, (tuple, list)) and len(fuente_ref) >= 2:
+        familia = str(fuente_ref[0])
+        tamanio = int(fuente_ref[1])
+    elif isinstance(fuente_ref, str) and fuente_ref.strip():
+        familia = fuente_ref.strip()
+    return (familia, tamanio, "bold italic")
+
 
 class PanelPrincipal:
     """
@@ -57,6 +75,8 @@ class PanelPrincipal:
         self.controlador = controlador if controlador is not None else ControladorCore()
 
         aplicar_estilos_base(self.root)
+        self.fuente_panel: Tuple[str, int, str] = _fuente_bold_italic(FUENTE_BASE)
+        self._configurar_tipografia_panel()
 
         roles = getattr(self.usuario_actual, "roles", []) or []
         roles_txt = ", ".join(r.nombre for r in roles) if roles else "Sin Roles"
@@ -74,6 +94,38 @@ class PanelPrincipal:
             nombres_roles=[r.nombre for r in roles],
         )
 
+    def _configurar_tipografia_panel(self) -> None:
+        """Aplica negrita e itálica manteniendo la familia y tamaño de FUENTE_BASE."""
+        familia, tamanio, _ = self.fuente_panel
+        try:
+            top = self.root.winfo_toplevel()
+            for nombre in tkfont.names(root=top):
+                try:
+                    f = tkfont.nametofont(nombre, root=top)
+                    f.configure(
+                        family=familia,
+                        size=tamanio,
+                        weight="bold",
+                        slant="italic",
+                    )
+                except Exception:
+                    continue
+
+            estilo = ttk.Style(top)
+            estilo.configure(".", font=self.fuente_panel)
+            estilo.configure("TLabel", font=self.fuente_panel)
+            estilo.configure("Subtitulo.TLabel", font=self.fuente_panel)
+            estilo.configure("Muted.TLabel", font=self.fuente_panel)
+            estilo.configure("TButton", font=self.fuente_panel)
+            estilo.configure("TCheckbutton", font=self.fuente_panel)
+            estilo.configure("TEntry", font=self.fuente_panel)
+            estilo.configure("TCombobox", font=self.fuente_panel)
+            estilo.configure("TLabelframe.Label", font=self.fuente_panel)
+            estilo.configure("Treeview", font=self.fuente_panel)
+            estilo.configure("Treeview.Heading", font=self.fuente_panel)
+        except Exception:
+            pass
+
     def _dibujar_interfaz(
         self,
         username: str,
@@ -86,79 +138,86 @@ class PanelPrincipal:
         # =======================================================
         # MENÚ LATERAL (Izquierda)
         # =======================================================
-        self.frame_menu = ttk.Frame(self.root, width=260, padding=12)
+        self.frame_menu = ttk.Frame(self.root, width=220, padding=12)
         self.frame_menu.grid(row=0, column=0, sticky="ns")
         self.frame_menu.grid_propagate(False)
 
         lbl_menu = ttk.Label(
             self.frame_menu,
-            text="MENÚ PRINCIPAL",
-            style="Subtitulo.TLabel",
+            text="MENÚ",
+            font=self.fuente_panel,
         )
         lbl_menu.pack(pady=(10, 4), anchor="w")
 
         lbl_usuario = ttk.Label(
             self.frame_menu,
             text=f"{username} · {roles_txt}",
-            style="Muted.TLabel",
-            wraplength=230,
+            font=self.fuente_panel,
+            wraplength=190,
         )
         lbl_usuario.pack(pady=(0, 12), anchor="w")
 
         es_admin = "Administrador" in nombres_roles
 
-        btn_rrhh = ttk.Button(
+        btn_clientes = ttk.Button(
             self.frame_menu,
-            text="👥 Padrón Empleados",
+            text="Clientes",
+            command=self.abrir_modulo_clientes,
+        )
+        btn_clientes.pack(fill="x", pady=4)
+
+        btn_facturacion = ttk.Button(
+            self.frame_menu,
+            text="Facturación",
+            command=self.abrir_modulo_facturacion,
+        )
+        btn_facturacion.pack(fill="x", pady=4)
+
+        btn_personal = ttk.Button(
+            self.frame_menu,
+            text="Personal",
             command=self.abrir_modulo_rrhh,
         )
-        btn_rrhh.pack(fill="x", pady=4)
+        btn_personal.pack(fill="x", pady=4)
 
         btn_haberes = ttk.Button(
             self.frame_menu,
-            text="💰 Liquidación Haberes",
+            text="Haberes",
             command=self.abrir_modulo_haberes,
         )
         btn_haberes.pack(fill="x", pady=4)
 
         btn_proveedores = ttk.Button(
             self.frame_menu,
-            text="🏭 Padrón Proveedores",
+            text="Proveedores",
             command=self.abrir_modulo_proveedores,
         )
         btn_proveedores.pack(fill="x", pady=4)
 
         btn_inventario = ttk.Button(
             self.frame_menu,
-            text="📦 Control de Stock",
+            text="Inventario",
             command=self.abrir_modulo_inventario,
         )
         btn_inventario.pack(fill="x", pady=4)
 
-        btn_clientes = ttk.Button(
-            self.frame_menu,
-            text="🧑‍🤝‍🧑 Padrón Clientes",
-            command=self.abrir_modulo_clientes,
-        )
-        btn_clientes.pack(fill="x", pady=4)
-
-        ttk.Separator(self.frame_menu, orient="horizontal").pack(fill="x", pady=12)
-
-        btn_salir = ttk.Button(
-            self.frame_menu,
-            text="🚪 Cerrar Sesión",
-            command=self.cerrar_sesion,
-        )
-        btn_salir.pack(fill="x", pady=4)
-
         if es_admin:
-            ttk.Separator(self.frame_menu, orient="horizontal").pack(fill="x", pady=12)
+            ttk.Separator(self.frame_menu, orient="horizontal").pack(fill="x", pady=10)
             btn_backup = ttk.Button(
                 self.frame_menu,
-                text="💾 Backup Sistema",
+                text="Backup",
                 command=self.ejecutar_backup,
             )
             btn_backup.pack(fill="x", pady=4)
+
+        ttk.Separator(self.frame_menu, orient="horizontal").pack(fill="x", pady=10)
+
+        btn_salir = ttk.Button(
+            self.frame_menu,
+            text="Salir",
+            command=self.cerrar_sesion,
+        )
+        btn_salir.pack(fill="x", pady=4)
 
         # =======================================================
         # ÁREA DE TRABAJO CENTRAL (Derecha)
@@ -176,14 +235,14 @@ class PanelPrincipal:
         ttk.Label(
             tarjeta_bienvenida,
             text=f"Bienvenido/a al Sistema Frankie, {username}",
-            style="Subtitulo.TLabel",
+            font=self.fuente_panel,
             justify="center",
         ).pack(pady=(0, 8))
 
         ttk.Label(
             tarjeta_bienvenida,
             text="Seleccione una opción del menú lateral para comenzar.",
-            style="Muted.TLabel",
+            font=self.fuente_panel,
             justify="center",
         ).pack()
 
@@ -218,12 +277,26 @@ class PanelPrincipal:
             tarjeta,
             text=texto,
             foreground=COLOR_TEXTO,
-            font=FUENTE_BASE,
+            font=self.fuente_panel,
             justify="center",
             wraplength=520,
         )
         lbl.pack()
         self.pantalla_actual = tarjeta
+
+    def abrir_modulo_clientes(self) -> None:
+        """Abre el módulo de clientes."""
+        self.gestionar_apertura(
+            InterfazClientes,
+            "Módulo de Clientes no disponible.",
+        )
+
+    def abrir_modulo_facturacion(self) -> None:
+        """Abre el módulo de facturación."""
+        self.gestionar_apertura(
+            InterfazFacturacion,
+            "Módulo de Facturación no disponible.",
+        )
 
     def abrir_modulo_rrhh(self) -> None:
         """Abre el módulo de empleados."""
@@ -250,13 +323,6 @@ class PanelPrincipal:
             "Módulo de Inventario no disponible.",
         )
 
-    def abrir_modulo_clientes(self) -> None:
-        """Abre el módulo de clientes."""
-        self.gestionar_apertura(
-            InterfazClientes,
-            "Módulo de Clientes no disponible.",
-        )
-
     def ejecutar_backup(self) -> None:
         """Solicita al controlador core la generación de un respaldo del sistema."""
         try:
@@ -277,7 +343,7 @@ class PanelPrincipal:
     def cerrar_sesion(self) -> None:
         """Confirma el cierre de sesión y delega el retorno al login."""
         if messagebox.askyesno(
-            "Cerrar Sesión",
+            "Salir",
             "¿Está seguro de que desea cerrar la sesión actual?",
             parent=self.root,
         ):
