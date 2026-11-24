@@ -14,7 +14,7 @@ import re
 import sqlite3
 import tkinter as tk
 from tkinter import messagebox, ttk
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from dominio.entidades_rrhh import Empleado
 from infraestructura.repo_haberes import RepositorioHaberes
@@ -34,6 +34,8 @@ except ImportError:
         aplicar_estilos_base = None
 
 
+ROLES_LIQUIDACION_HABERES: Set[str] = {"admin", "gerente"}
+
 _EXCEPCIONES_OPERACION = (
     sqlite3.Error,
     ValueError,
@@ -51,6 +53,65 @@ _EXCEPCIONES_UI = (
     tk.TclError,
     OSError,
 )
+
+
+def _a_float_seguro(valor: Any, respaldo: float = 0.0) -> float:
+    """Convierte a float de forma segura evitando advertencias de tipo por None/Any."""
+    if valor is None or isinstance(valor, bool):
+        return float(respaldo)
+    if isinstance(valor, (int, float)):
+        return float(valor)
+    if isinstance(valor, str):
+        limpio = valor.strip().replace(",", ".")
+        if not limpio:
+            return float(respaldo)
+        try:
+            return float(limpio)
+        except ValueError:
+            return float(respaldo)
+    return float(respaldo)
+
+
+def _a_int_seguro(valor: Any, respaldo: int = 0) -> int:
+    """Convierte a int de forma segura evitando advertencias de tipo por None/Any."""
+    if valor is None or isinstance(valor, bool):
+        return int(respaldo)
+    if isinstance(valor, int):
+        return valor
+    if isinstance(valor, float):
+        return int(valor)
+    if isinstance(valor, str):
+        limpio = valor.strip()
+        if not limpio:
+            return int(respaldo)
+        try:
+            return int(float(limpio))
+        except ValueError:
+            return int(respaldo)
+    return int(respaldo)
+
+
+def _normalizar_rol(nombre_rol: str) -> str:
+    limpio = (nombre_rol or "").strip().lower()
+    if limpio in {"admin", "administrador"}:
+        return "admin"
+    if limpio == "gerente":
+        return "gerente"
+    if limpio == "vendedor":
+        return "vendedor"
+    if limpio == "administrativo":
+        return "administrativo"
+    return limpio
+
+
+def _obtener_roles_normalizados(usuario_actual: Any) -> Set[str]:
+    roles: Set[str] = set()
+    for rol in getattr(usuario_actual, "roles", None) or []:
+        nombre = getattr(rol, "nombre", str(rol))
+        norm = _normalizar_rol(nombre)
+        if norm:
+            roles.add(norm)
+    return roles
 
 
 def _obtener_carpeta_recibos_haberes() -> Path:
@@ -82,8 +143,16 @@ def obtener_ruta_recibo_html(legajo: str, periodo: str) -> Path:
 class InterfazHaberes(ttk.Frame):
     """Componente visual modular basado en ttk.Frame para la Liquidación de Haberes."""
 
-    def __init__(self, parent: tk.Misc) -> None:
+    def __init__(self, parent: tk.Misc, usuario_actual: Any = None) -> None:
         super().__init__(parent)
+        self.usuario_actual = usuario_actual
+        roles_activos = _obtener_roles_normalizados(usuario_actual)
+        self.puede_liquidar: bool = (
+            True
+            if usuario_actual is None
+            else bool(roles_activos & ROLES_LIQUIDACION_HABERES)
+        )
+
         if callable(aplicar_estilos_base):
             try:
                 aplicar_estilos_base(self)
@@ -115,8 +184,14 @@ class InterfazHaberes(ttk.Frame):
         self.var_resumen_neto = tk.StringVar(value="$ 0.00")
 
         self._construir_interfaz()
+        self._aplicar_permisos_ui()
         self._cargar_empleados()
         self._cargar_historial()
+
+    def _aplicar_permisos_ui(self) -> None:
+        """Habilita o bloquea el cálculo y guardado de liquidaciones según rol."""
+        estado_liq = "normal" if self.puede_liquidar else "disabled"
+        self.btn_calcular_guardar.config(state=estado_liq)
 
     def _construir_interfaz(self) -> None:
         """Construye el panel de liquidación, barra lateral derecha e historial."""
@@ -133,7 +208,9 @@ class InterfazHaberes(ttk.Frame):
         frame_superior.columnconfigure(0, weight=1)
         frame_superior.columnconfigure(1, weight=1)
 
-        frame_izq = ttk.LabelFrame(frame_superior, text=" Parámetros de Liquidación ", padding=10)
+        frame_izq = ttk.LabelFrame(
+            frame_superior, text=" Parámetros de Liquidación ", padding=10
+        )
         frame_izq.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
         frame_izq.columnconfigure(1, weight=1)
 
@@ -144,28 +221,38 @@ class InterfazHaberes(ttk.Frame):
         self.combo_empleado.grid(row=0, column=1, sticky="ew", pady=3)
         self.combo_empleado.bind("<<ComboboxSelected>>", self._al_cambiar_empleado)
 
-        ttk.Label(frame_izq, text="Período (AAAA-MM):").grid(row=1, column=0, sticky="w", pady=3)
+        ttk.Label(frame_izq, text="Período (AAAA-MM):").grid(
+            row=1, column=0, sticky="w", pady=3
+        )
         ttk.Entry(frame_izq, textvariable=self.var_periodo).grid(
             row=1, column=1, sticky="ew", pady=3
         )
 
-        ttk.Label(frame_izq, text="Sueldo Básico ($):").grid(row=2, column=0, sticky="w", pady=3)
+        ttk.Label(frame_izq, text="Sueldo Básico ($):").grid(
+            row=2, column=0, sticky="w", pady=3
+        )
         entry_basico = ttk.Entry(
             frame_izq, textvariable=self.var_sueldo_basico, state="readonly"
         )
         entry_basico.grid(row=2, column=1, sticky="ew", pady=3)
 
-        ttk.Label(frame_izq, text="Antigüedad (años):").grid(row=3, column=0, sticky="w", pady=3)
+        ttk.Label(frame_izq, text="Antigüedad (años):").grid(
+            row=3, column=0, sticky="w", pady=3
+        )
         ttk.Entry(frame_izq, textvariable=self.var_antiguedad).grid(
             row=3, column=1, sticky="ew", pady=3
         )
 
-        ttk.Label(frame_izq, text="Horas Extra ($):").grid(row=4, column=0, sticky="w", pady=3)
+        ttk.Label(frame_izq, text="Horas Extra ($):").grid(
+            row=4, column=0, sticky="w", pady=3
+        )
         ttk.Entry(frame_izq, textvariable=self.var_horas_extra).grid(
             row=4, column=1, sticky="ew", pady=3
         )
 
-        ttk.Label(frame_izq, text="Feriados ($):").grid(row=5, column=0, sticky="w", pady=3)
+        ttk.Label(frame_izq, text="Feriados ($):").grid(
+            row=5, column=0, sticky="w", pady=3
+        )
         ttk.Entry(frame_izq, textvariable=self.var_feriados).grid(
             row=5, column=1, sticky="ew", pady=3
         )
@@ -202,7 +289,9 @@ class InterfazHaberes(ttk.Frame):
             frame_checks, text="Sindicato", variable=self.var_aplica_sindicato
         ).pack(side="left")
 
-        frame_der = ttk.LabelFrame(frame_superior, text=" Resumen de Liquidación ", padding=10)
+        frame_der = ttk.LabelFrame(
+            frame_superior, text=" Resumen de Liquidación ", padding=10
+        )
         frame_der.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
         frame_der.columnconfigure(1, weight=1)
 
@@ -232,11 +321,12 @@ class InterfazHaberes(ttk.Frame):
         frame_botones.columnconfigure(0, weight=1)
         frame_botones.columnconfigure(1, weight=1)
 
-        ttk.Button(
+        self.btn_calcular_guardar = ttk.Button(
             frame_botones,
             text="Calcular y Guardar",
             command=self._calcular_y_guardar,
-        ).grid(row=0, column=0, padx=(0, 5), sticky="ew")
+        )
+        self.btn_calcular_guardar.grid(row=0, column=0, padx=(0, 5), sticky="ew")
 
         self.btn_emitir_recibo = ttk.Button(
             frame_botones,
@@ -246,7 +336,9 @@ class InterfazHaberes(ttk.Frame):
         )
         self.btn_emitir_recibo.grid(row=0, column=1, padx=(5, 0), sticky="ew")
 
-        frame_hist = ttk.LabelFrame(self, text=" Historial de Liquidaciones ", padding=10)
+        frame_hist = ttk.LabelFrame(
+            self, text=" Historial de Liquidaciones ", padding=10
+        )
         frame_hist.pack(fill="both", expand=True, padx=8, pady=(4, 8))
         frame_hist.rowconfigure(0, weight=1)
         frame_hist.columnconfigure(0, weight=1)
@@ -301,7 +393,7 @@ class InterfazHaberes(ttk.Frame):
         emp = self.empleados_por_etiqueta.get(etiqueta)
         self.empleado_actual = emp
         if emp is not None:
-            sueldo = float(getattr(emp, "sueldo", 0.0) or 0.0)
+            sueldo = _a_float_seguro(getattr(emp, "sueldo", 0.0), 0.0)
             self.var_sueldo_basico.set(f"{sueldo:.2f}")
         else:
             self.var_sueldo_basico.set("0.00")
@@ -328,6 +420,14 @@ class InterfazHaberes(ttk.Frame):
 
     def _calcular_y_guardar(self) -> None:
         """Calcula los haberes, persiste la liquidación y habilita la emisión del recibo."""
+        if not self.puede_liquidar:
+            messagebox.showwarning(
+                "Acceso Restringido",
+                "Tu rol actual no tiene permisos para liquidar haberes.",
+                parent=self,
+            )
+            return
+
         if not self.empleado_actual or not self.empleado_actual.id_empleado:
             messagebox.showwarning(
                 "Empleado Requerido",
@@ -359,7 +459,7 @@ class InterfazHaberes(ttk.Frame):
         try:
             repo = RepositorioHaberes()
             res = repo.calcular_liquidacion(
-                id_empleado=self.empleado_actual.id_empleado,
+                id_empleado=_a_int_seguro(self.empleado_actual.id_empleado, 0),
                 periodo=periodo,
                 basico=basico,
                 antiguedad_anios=antiguedad,
@@ -374,27 +474,33 @@ class InterfazHaberes(ttk.Frame):
                 aplica_sindicato=bool(self.var_aplica_sindicato.get()),
             )
             datos_liq = res if isinstance(res, dict) else {}
-            bruto = float(
-                datos_liq.get(
-                    "bruto",
-                    datos_liq.get("total_remunerativo", basico + horas_extra + feriados + ventas),
+
+            bruto_base = basico + horas_extra + feriados + ventas
+            bruto_raw = (
+                datos_liq.get("remunerativo")
+                if "remunerativo" in datos_liq
+                else datos_liq.get(
+                    "bruto", datos_liq.get("total_remunerativo", bruto_base)
                 )
-                or 0.0
             )
-            deducciones = float(
-                datos_liq.get(
-                    "deducciones",
-                    datos_liq.get("total_deducciones", adelanto),
+            bruto = _a_float_seguro(bruto_raw, respaldo=bruto_base)
+
+            ded_raw = (
+                datos_liq.get("descuentos")
+                if "descuentos" in datos_liq
+                else datos_liq.get(
+                    "deducciones", datos_liq.get("total_deducciones", adelanto)
                 )
-                or 0.0
             )
-            neto = float(
-                datos_liq.get(
-                    "neto",
-                    datos_liq.get("neto_a_cobrar", bruto - deducciones),
-                )
-                or 0.0
+            deducciones = _a_float_seguro(ded_raw, respaldo=adelanto)
+
+            neto_base = bruto - deducciones
+            neto_raw = (
+                datos_liq.get("neto")
+                if "neto" in datos_liq
+                else datos_liq.get("neto_a_cobrar", neto_base)
             )
+            neto = _a_float_seguro(neto_raw, respaldo=neto_base)
 
             self.ultima_liquidacion = {
                 "empleado": self.empleado_actual,
@@ -445,28 +551,28 @@ class InterfazHaberes(ttk.Frame):
                 id_liq = reg.get("id_liquidacion", reg.get("id", ""))
                 emp_txt = reg.get("empleado", reg.get("id_empleado", ""))
                 periodo = reg.get("periodo", "")
-                bruto = float(
-                    reg.get("bruto", reg.get("total_remunerativo", 0.0)) or 0.0
+                bruto = _a_float_seguro(
+                    reg.get("bruto", reg.get("total_remunerativo", 0.0)), 0.0
                 )
-                ded = float(
-                    reg.get("deducciones", reg.get("total_deducciones", 0.0)) or 0.0
+                ded = _a_float_seguro(
+                    reg.get("deducciones", reg.get("total_deducciones", 0.0)), 0.0
                 )
-                neto = float(
-                    reg.get("neto", reg.get("neto_a_cobrar", 0.0)) or 0.0
+                neto = _a_float_seguro(
+                    reg.get("neto", reg.get("neto_a_cobrar", 0.0)), 0.0
                 )
             else:
                 id_liq = getattr(reg, "id_liquidacion", getattr(reg, "id", ""))
                 emp_txt = getattr(reg, "empleado", getattr(reg, "id_empleado", ""))
                 periodo = getattr(reg, "periodo", "")
-                bruto = float(
-                    getattr(reg, "bruto", getattr(reg, "total_remunerativo", 0.0)) or 0.0
+                bruto = _a_float_seguro(
+                    getattr(reg, "bruto", getattr(reg, "total_remunerativo", 0.0)), 0.0
                 )
-                ded = float(
-                    getattr(reg, "deducciones", getattr(reg, "total_deducciones", 0.0))
-                    or 0.0
+                ded = _a_float_seguro(
+                    getattr(reg, "deducciones", getattr(reg, "total_deducciones", 0.0)),
+                    0.0,
                 )
-                neto = float(
-                    getattr(reg, "neto", getattr(reg, "neto_a_cobrar", 0.0)) or 0.0
+                neto = _a_float_seguro(
+                    getattr(reg, "neto", getattr(reg, "neto_a_cobrar", 0.0)), 0.0
                 )
 
             self.tabla_hist.insert(
@@ -494,11 +600,20 @@ class InterfazHaberes(ttk.Frame):
 
         liq = self.ultima_liquidacion
         emp: Empleado = liq["empleado"]
-        periodo: str = liq["periodo"]
+        periodo: str = str(liq.get("periodo", ""))
+
+        basico_val = _a_float_seguro(liq.get("sueldo_basico", 0.0), 0.0)
+        horas_extra_val = _a_float_seguro(liq.get("horas_extra", 0.0), 0.0)
+        feriados_val = _a_float_seguro(liq.get("feriados", 0.0), 0.0)
+        ventas_val = _a_float_seguro(liq.get("ventas", 0.0), 0.0)
+        adelanto_val = _a_float_seguro(liq.get("adelanto", 0.0), 0.0)
+        bruto_val = _a_float_seguro(liq.get("bruto", 0.0), 0.0)
+        deducciones_val = _a_float_seguro(liq.get("deducciones", 0.0), 0.0)
+        neto_val = _a_float_seguro(liq.get("neto", 0.0), 0.0)
 
         texto_recibo = (
             "================================================================\n"
-            "                 FRANKIE GESTOR S.R.L. - RECIBO DE HABERES              \n"
+            "          FRANKIE GESTOR COMERCIAL - RECIBO DE HABERES          \n"
             "                      Ley 20.744 - Comprobante de Pago                  \n"
             "================================================================\n"
             f" Legajo: {emp.legajo:<12} Período: {periodo}\n"
@@ -507,15 +622,15 @@ class InterfazHaberes(ttk.Frame):
             "----------------------------------------------------------------\n"
             " CONCEPTO                                  HABERES         DEDUCCIONES  \n"
             "----------------------------------------------------------------\n"
-            f" Sueldo Básico                         $ {float(liq.get('sueldo_basico', 0.0)):>10,.2f}\n"
-            f" Horas Extra                           $ {float(liq.get('horas_extra', 0.0)):>10,.2f}\n"
-            f" Feriados                              $ {float(liq.get('feriados', 0.0)):>10,.2f}\n"
-            f" Ventas / Comisiones                   $ {float(liq.get('ventas', 0.0)):>10,.2f}\n"
-            f" Adelanto de Haberes                                        $ {float(liq.get('adelanto', 0.0)):>10,.2f}\n"
+            f" Sueldo Básico                         $ {basico_val:>10,.2f}\n"
+            f" Horas Extra                           $ {horas_extra_val:>10,.2f}\n"
+            f" Feriados                              $ {feriados_val:>10,.2f}\n"
+            f" Ventas / Comisiones                   $ {ventas_val:>10,.2f}\n"
+            f" Adelanto de Haberes                                        $ {adelanto_val:>10,.2f}\n"
             "----------------------------------------------------------------\n"
-            f" TOTAL BRUTO                           $ {float(liq.get('bruto', 0.0)):>10,.2f}\n"
-            f" TOTAL DEDUCCIONES                                          $ {float(liq.get('deducciones', 0.0)):>10,.2f}\n"
-            f" NETO A COBRAR                         $ {float(liq.get('neto', 0.0)):>10,.2f}\n"
+            f" TOTAL BRUTO                           $ {bruto_val:>10,.2f}\n"
+            f" TOTAL DEDUCCIONES                                          $ {deducciones_val:>10,.2f}\n"
+            f" NETO A COBRAR                         $ {neto_val:>10,.2f}\n"
             "================================================================\n"
         )
 
@@ -560,7 +675,7 @@ class InterfazHaberes(ttk.Frame):
 
 if __name__ == "__main__":
     root = tk.Tk()
-    root.title("Frankie Gestor - Liquidación de Haberes")
+    root.title("Frankie Gestor Comercial - Liquidación de Haberes")
     root.geometry("1120x720")
     vista = InterfazHaberes(root)
     vista.pack(fill="both", expand=True, padx=10, pady=10)

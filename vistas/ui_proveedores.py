@@ -5,10 +5,11 @@ MÓDULO DE VISTAS: PROVEEDORES (vistas/ui_proveedores.py)
 Alta, Listado, Edición y Baja/Reactivación Lógica de proveedores
 (Persona Jurídica, CUIT prefijo 30, rubro, contacto, teléfono, email y
 domicilio), usando la denominación unificada "Proveedores".
+Incluye control RBAC para operacines de escritura y cambio de estado.
 ===============================================================================
 """
 
-from typing import Any, cast, Dict, List, Literal, Optional, Tuple
+from typing import Any, cast, Dict, Literal, Optional, Set, Tuple
 import tkinter as tk
 from tkinter import font as tkfont
 from tkinter import messagebox, ttk
@@ -28,6 +29,31 @@ TAMANIO_FUENTE = 12
 ALTO_FILA_TABLA = 34
 AnchorTk = Literal["nw", "n", "ne", "w", "center", "e", "sw", "s", "se"]
 
+ROLES_GESTION_PROVEEDORES: Set[str] = {"admin", "gerente"}
+
+
+def _normalizar_rol(nombre_rol: str) -> str:
+    limpio = (nombre_rol or "").strip().lower()
+    if limpio in {"admin", "administrador"}:
+        return "admin"
+    if limpio == "gerente":
+        return "gerente"
+    if limpio == "vendedor":
+        return "vendedor"
+    if limpio == "administrativo":
+        return "administrativo"
+    return limpio
+
+
+def _obtener_roles_normalizados(usuario_actual: Any) -> Set[str]:
+    roles: Set[str] = set()
+    for rol in getattr(usuario_actual, "roles", None) or []:
+        nombre = getattr(rol, "nombre", str(rol))
+        norm = _normalizar_rol(nombre)
+        if norm:
+            roles.add(norm)
+    return roles
+
 
 def _a_entero_opcional(valor: Any) -> Optional[int]:
     """Convierte a int de forma segura, o devuelve None."""
@@ -35,6 +61,8 @@ def _a_entero_opcional(valor: Any) -> Optional[int]:
         return None
     if isinstance(valor, int):
         return valor
+    if isinstance(valor, float):
+        return int(valor)
     if isinstance(valor, str):
         texto = valor.strip()
         if not texto:
@@ -49,8 +77,22 @@ def _a_entero_opcional(valor: Any) -> Optional[int]:
 class InterfazProveedores(ttk.Frame):
     """Vista modular para gestionar Proveedores con patrón visual apilado."""
 
-    def __init__(self, parent: tk.Misc, *args: Any, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        parent: tk.Misc,
+        usuario_actual: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(parent, *args, **kwargs)
+        self.usuario_actual = usuario_actual
+        roles_activos = _obtener_roles_normalizados(usuario_actual)
+        self.puede_gestionar_proveedores: bool = (
+            True
+            if usuario_actual is None
+            else bool(roles_activos & ROLES_GESTION_PROVEEDORES)
+        )
+
         if callable(aplicar_estilos_base):
             try:
                 aplicar_estilos_base(self.winfo_toplevel())
@@ -80,7 +122,16 @@ class InterfazProveedores(ttk.Frame):
 
         self._construir_interfaz()
         self._configurar_fuentes()
+        self._aplicar_permisos_ui()
         self.cargar_tabla_proveedores()
+
+    def _aplicar_permisos_ui(self) -> None:
+        """Habilita o bloquea acciones de escritura según el rol del usuario."""
+        estado_escritura = "normal" if self.puede_gestionar_proveedores else "disabled"
+        self.btn_guardar.config(state=estado_escritura)
+        if not self.puede_gestionar_proveedores:
+            self.btn_actualizar.config(state="disabled")
+            self.btn_toggle_estado.config(state="disabled")
 
     def _configurar_fuentes(self) -> None:
         """Fuerza 12 pt sin itálicas (slant='roman') en fuentes Tk, entradas y ttk."""
@@ -396,6 +447,14 @@ class InterfazProveedores(ttk.Frame):
 
     def guardar_proveedor(self) -> None:
         """Registra un nuevo proveedor y actualiza el listado."""
+        if not self.puede_gestionar_proveedores:
+            messagebox.showwarning(
+                "Acceso restringido",
+                "Tu rol actual no tiene permisos para registrar proveedores.",
+                parent=self,
+            )
+            return
+
         prov = self._construir_entidad_proveedor(
             id_proveedor=None,
             id_persona=None,
@@ -417,6 +476,14 @@ class InterfazProveedores(ttk.Frame):
 
     def actualizar_proveedor(self) -> None:
         """Actualiza los datos del proveedor seleccionado."""
+        if not self.puede_gestionar_proveedores:
+            messagebox.showwarning(
+                "Acceso restringido",
+                "Tu rol actual no tiene permisos para actualizar proveedores.",
+                parent=self,
+            )
+            return
+
         if self.proveedor_seleccionado_id is None:
             messagebox.showwarning(
                 "Sin selección",
@@ -446,6 +513,14 @@ class InterfazProveedores(ttk.Frame):
 
     def toggle_estado_proveedor(self) -> None:
         """Activa o desactiva lógicamente al proveedor seleccionado."""
+        if not self.puede_gestionar_proveedores:
+            messagebox.showwarning(
+                "Acceso restringido",
+                "Tu rol actual no tiene permisos para cambiar el estado de proveedores.",
+                parent=self,
+            )
+            return
+
         if self.proveedor_seleccionado_id is None:
             return
 
@@ -482,7 +557,9 @@ class InterfazProveedores(ttk.Frame):
         self.var_telefono.set("")
         self.var_email.set("")
         self.var_domicilio.set("")
-        self.btn_guardar.config(state="normal")
+        self.btn_guardar.config(
+            state="normal" if self.puede_gestionar_proveedores else "disabled"
+        )
         self.btn_actualizar.config(state="disabled")
         self.btn_toggle_estado.config(text="Deshabilitar", state="disabled")
         if self.tabla.selection():
@@ -517,16 +594,17 @@ class InterfazProveedores(ttk.Frame):
         self.var_email.set(str(getattr(prov, "email", "") or ""))
         self.var_domicilio.set(str(getattr(prov, "domicilio", "") or ""))
 
-        self.btn_actualizar.config(state="normal")
+        estado_btn = "normal" if self.puede_gestionar_proveedores else "disabled"
+        self.btn_actualizar.config(state=estado_btn)
         self.btn_toggle_estado.config(
-            state="normal",
+            state=estado_btn,
             text="Reactivar" if not self.proveedor_activo else "Deshabilitar",
         )
 
 
 if __name__ == "__main__":
     root = tk.Tk()
-    root.title("Frankie Gestor - Proveedores")
+    root.title("Frankie Gestor Comercial - Proveedores")
     root.geometry("1180x740")
     InterfazProveedores(root)
     root.mainloop()

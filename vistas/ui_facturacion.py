@@ -5,16 +5,15 @@ MÓDULO DE VISTAS: FACTURACIÓN Y VENTAS (vistas/ui_facturacion.py)
 Interfaz gráfica para la emisión de comprobantes de venta siguiendo el patrón
 visual apilado del sistema:
 - Medios de pago: Efectivo, Transferencia, Tarjeta de crédito.
-- CRUD de ítems con "Agregar Ítem", "Modificar Producto" y "Quitar".
+- CRUD de ítems con "Agregar Ítem", "Modificar Producto", "Actualizar" y "Quitar".
 - Tabla de detalle centrada exclusivamente en productos.
 - Bonificaciones, recargos e impuestos concentrados en Totales y Emisión con
-  recálculo automático en tiempo real y botones visibles sin recorte.
+  recálculo automático en tiempo real, control RBAC y botones visibles.
 - Tipografía 12 pt sin itálicas (slant='roman') y estilos globales.
 ===============================================================================
 """
 
-from datetime import datetime
-from typing import Any, cast, Dict, List, Literal, Optional, Tuple
+from typing import Any, cast, Dict, List, Literal, Optional, Set, Tuple
 import tkinter as tk
 from tkinter import font as tkfont
 from tkinter import messagebox, ttk
@@ -38,6 +37,31 @@ MEDIOS_PAGO: Tuple[str, ...] = (
     "Transferencia",
     "Tarjeta de crédito",
 )
+
+ROLES_EMISION_FACTURA: Set[str] = {"admin", "gerente", "vendedor"}
+
+
+def _normalizar_rol(nombre_rol: str) -> str:
+    limpio = (nombre_rol or "").strip().lower()
+    if limpio in {"admin", "administrador"}:
+        return "admin"
+    if limpio == "gerente":
+        return "gerente"
+    if limpio == "vendedor":
+        return "vendedor"
+    if limpio == "administrativo":
+        return "administrativo"
+    return limpio
+
+
+def _obtener_roles_normalizados(usuario_actual: Any) -> Set[str]:
+    roles: Set[str] = set()
+    for rol in getattr(usuario_actual, "roles", None) or []:
+        nombre = getattr(rol, "nombre", str(rol))
+        norm = _normalizar_rol(nombre)
+        if norm:
+            roles.add(norm)
+    return roles
 
 
 def _a_entero_o_cero(valor: Any) -> int:
@@ -79,8 +103,18 @@ def _a_flotante_o_cero(valor: Any) -> float:
 class InterfazFacturacion(ttk.Frame):
     """Vista modular para emisión de facturas con patrón visual apilado."""
 
-    def __init__(self, parent: tk.Misc, *args: Any, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        parent: tk.Misc,
+        usuario_actual: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(parent, *args, **kwargs)
+        self.usuario_actual = usuario_actual
+        roles_activos = _obtener_roles_normalizados(usuario_actual)
+        self.puede_emitir_factura: bool = bool(roles_activos & ROLES_EMISION_FACTURA)
+
         if callable(aplicar_estilos_base):
             try:
                 aplicar_estilos_base(self.winfo_toplevel())
@@ -96,6 +130,8 @@ class InterfazFacturacion(ttk.Frame):
         self.indice_item_edicion: Optional[int] = None
         self.item_id_por_fila: Dict[str, int] = {}
         self.ultimo_resumen_impresion: Optional[str] = None
+        self._ultimo_calculo_repo: Optional[Dict[str, Any]] = None
+        self._actualizando_campos: bool = False
 
         self.var_cliente = tk.StringVar()
         self.var_vendedor = tk.StringVar()
@@ -118,17 +154,28 @@ class InterfazFacturacion(ttk.Frame):
         self._construir_interfaz()
         self._configurar_fuentes()
         self._conectar_recalculo_automatico()
+        self._aplicar_permisos_ui()
         self.cargar_datos_iniciales()
-        self._recalcular_totales()
+        self._recalcular_totales(desde_medio_pago=True)
+
+    def _aplicar_permisos_ui(self) -> None:
+        """Habilita o bloquea la emisión de facturas según el rol del usuario."""
+        estado_emision = "normal" if self.puede_emitir_factura else "disabled"
+        self.btn_emitir.config(state=estado_emision)
 
     def _conectar_recalculo_automatico(self) -> None:
-        """Recalcula automáticamente cada vez que cambian los porcentajes."""
+        """Recalcula automáticamente cada vez que cambian medio de pago o porcentajes."""
+        self.var_medio_pago.trace_add(
+            "write", lambda *_args: self._recalcular_totales(desde_medio_pago=True)
+        )
         for var in (
             self.var_bonificacion_pct,
             self.var_recargo_pct,
             self.var_impuesto_pct,
         ):
-            var.trace_add("write", lambda *_args: self._recalcular_totales())
+            var.trace_add(
+                "write", lambda *_args: self._recalcular_totales(desde_medio_pago=False)
+            )
 
     def _configurar_fuentes(self) -> None:
         """Fuerza 12 pt sin itálicas (slant='roman') en fuentes Tk, entradas y ttk."""
@@ -199,7 +246,6 @@ class InterfazFacturacion(ttk.Frame):
                 self._aplicar_fuente_recursiva(hijo, fuente)
 
     def _construir_interfaz(self) -> None:
-        # 1. Bloque superior: Comprobante y carga/edición de producto (2 columnas)
         frame_form = ttk.LabelFrame(
             self, text=" Datos del Comprobante y Productos ", padding=10
         )
@@ -207,7 +253,6 @@ class InterfazFacturacion(ttk.Frame):
         frame_form.columnconfigure(1, weight=1)
         frame_form.columnconfigure(3, weight=1)
 
-        # Fila 0: Cliente | Vendedor
         ttk.Label(frame_form, text="Cliente *:").grid(
             row=0, column=0, sticky="w", padx=6, pady=3
         )
@@ -228,7 +273,6 @@ class InterfazFacturacion(ttk.Frame):
         )
         self.combo_vendedores.grid(row=0, column=3, sticky="ew", padx=6, pady=3)
 
-        # Fila 1: Medio de pago | Producto
         ttk.Label(frame_form, text="Medio de pago *:").grid(
             row=1, column=0, sticky="w", padx=6, pady=3
         )
@@ -250,7 +294,6 @@ class InterfazFacturacion(ttk.Frame):
         )
         self.combo_productos.grid(row=1, column=3, sticky="ew", padx=6, pady=3)
 
-        # Fila 2: Cantidad | Desc. ítem (%)
         ttk.Label(frame_form, text="Cantidad *:").grid(
             row=2, column=0, sticky="w", padx=6, pady=3
         )
@@ -265,7 +308,6 @@ class InterfazFacturacion(ttk.Frame):
             row=2, column=3, sticky="ew", padx=6, pady=3
         )
 
-        # Fila 3: Botonera de ítems
         frame_botones_item = ttk.Frame(frame_form)
         frame_botones_item.grid(row=3, column=0, columnspan=4, sticky="e", pady=(4, 0))
 
@@ -281,16 +323,22 @@ class InterfazFacturacion(ttk.Frame):
             command=self.modificar_producto_seleccionado,
         ).pack(side="left", padx=5)
 
+        self.btn_actualizar_item = ttk.Button(
+            frame_botones_item,
+            text="Actualizar",
+            command=self.actualizar_producto_seleccionado,
+        )
+        self.btn_actualizar_item.pack(side="left", padx=5)
+
         ttk.Button(
             frame_botones_item,
             text="Quitar",
             command=self.quitar_producto_seleccionado,
         ).pack(side="left", padx=5)
 
-        # 2. Bloque central: Tabla exclusiva de productos (proporción compacta)
         frame_tabla = ttk.LabelFrame(
             self,
-            text=" Detalle de Productos (Seleccione una fila para modificar o quitar) ",
+            text=" Detalle de Productos (Seleccione una fila para modificar, actualizar o quitar) ",
             padding=10,
         )
         frame_tabla.pack(fill="x", padx=4, pady=(0, 4))
@@ -335,7 +383,6 @@ class InterfazFacturacion(ttk.Frame):
 
         self.tabla.bind("<<TreeviewSelect>>", self._al_seleccionar_fila)
 
-        # 3. Bloque inferior: Totales y Emisión (sin filas repetidas + botones visibles)
         frame_totales = ttk.LabelFrame(
             self, text=" Totales y Emisión ", padding=10
         )
@@ -343,7 +390,6 @@ class InterfazFacturacion(ttk.Frame):
         frame_totales.columnconfigure(1, weight=1)
         frame_totales.columnconfigure(3, weight=1)
 
-        # Fila 0: Bonificación (% y monto en la misma fila) | Recargo (% y monto en la misma fila)
         frame_bonif = ttk.Frame(frame_totales)
         frame_bonif.grid(row=0, column=0, columnspan=2, sticky="ew", padx=6, pady=2)
         ttk.Label(frame_bonif, text="Bonificación (%):").pack(side="left", padx=(0, 6))
@@ -364,7 +410,6 @@ class InterfazFacturacion(ttk.Frame):
             side="left"
         )
 
-        # Fila 1: Impuestos (% y monto en la misma fila) | Subtotal productos
         frame_imp = ttk.Frame(frame_totales)
         frame_imp.grid(row=1, column=0, columnspan=2, sticky="ew", padx=6, pady=2)
         ttk.Label(frame_imp, text="Impuestos (%):").pack(side="left", padx=(0, 6))
@@ -382,7 +427,6 @@ class InterfazFacturacion(ttk.Frame):
             row=1, column=3, sticky="e", padx=6, pady=2
         )
 
-        # Fila 2: TOTAL A PAGAR + Botonera de emisión siempre visible
         ttk.Label(
             frame_totales, text="TOTAL A PAGAR:", style="Subtitulo.TLabel"
         ).grid(row=2, column=0, sticky="w", padx=6, pady=(6, 2))
@@ -393,23 +437,26 @@ class InterfazFacturacion(ttk.Frame):
         frame_emision = ttk.Frame(frame_totales)
         frame_emision.grid(row=2, column=2, columnspan=2, sticky="e", pady=(6, 2))
 
-        ttk.Button(
+        self.btn_limpiar = ttk.Button(
             frame_emision,
             text="Limpiar",
             command=self.limpiar_comprobante,
-        ).pack(side="left", padx=4)
+        )
+        self.btn_limpiar.pack(side="left", padx=4)
 
-        ttk.Button(
+        self.btn_emitir = ttk.Button(
             frame_emision,
             text="Emitir Factura",
             command=self.emitir_factura,
-        ).pack(side="left", padx=4)
+        )
+        self.btn_emitir.pack(side="left", padx=4)
 
-        ttk.Button(
+        self.btn_imprimir = ttk.Button(
             frame_emision,
             text="Imprimir Factura",
             command=self.imprimir_factura,
-        ).pack(side="left", padx=4)
+        )
+        self.btn_imprimir.pack(side="left", padx=4)
 
     def cargar_datos_iniciales(self) -> None:
         """Carga clientes, vendedores activos y productos disponibles."""
@@ -436,7 +483,9 @@ class InterfazFacturacion(ttk.Frame):
                     or getattr(cli, "nombre", "")
                     or ""
                 ).strip()
-                nombre_fmt = f"{apellidos}, {nombres}".strip(", ") or f"Cliente #{id_cli}"
+                nombre_fmt = (
+                    f"{apellidos}, {nombres}".strip(", ") or f"Cliente #{id_cli}"
+                )
                 es_frec = (
                     bool(item.get("es_frecuente", False))
                     if isinstance(item, dict)
@@ -474,8 +523,15 @@ class InterfazFacturacion(ttk.Frame):
         except Exception as exc:
             messagebox.showerror("Error al cargar vendedores", str(exc), parent=self)
 
+        self._recargar_productos()
+
+    def _recargar_productos(self) -> None:
+        """Recarga el listado de productos y sus stocks actuales."""
         try:
-            self.productos_disponibles = list(RepositorioVentas.listar_productos_venta())
+            idx_previo = self.combo_productos.current()
+            self.productos_disponibles = list(
+                RepositorioVentas.listar_productos_venta()
+            )
             etiquetas_prod: List[str] = []
             for prod in self.productos_disponibles:
                 id_p = _a_entero_o_cero(prod.get("id"))
@@ -485,7 +541,8 @@ class InterfazFacturacion(ttk.Frame):
                 etiquetas_prod.append(f"[{cod_p or id_p}] {desc_p} (${precio_p:,.2f})")
             self.combo_productos["values"] = etiquetas_prod
             if etiquetas_prod:
-                self.combo_productos.current(0)
+                pos = idx_previo if 0 <= idx_previo < len(etiquetas_prod) else 0
+                self.combo_productos.current(pos)
         except Exception as exc:
             messagebox.showerror("Error al cargar productos", str(exc), parent=self)
 
@@ -593,7 +650,13 @@ class InterfazFacturacion(ttk.Frame):
 
         self.items_factura[idx_objetivo] = actualizado
         self.indice_item_edicion = None
+        if self.tabla.selection():
+            self.tabla.selection_remove(self.tabla.selection())
         self._refrescar_tabla_y_totales()
+
+    def actualizar_producto_seleccionado(self) -> None:
+        """Aplica los cambios del formulario al registro seleccionado de la tabla."""
+        self.modificar_producto_seleccionado()
 
     def quitar_producto_seleccionado(self) -> None:
         """Elimina el producto seleccionado de la tabla."""
@@ -627,6 +690,19 @@ class InterfazFacturacion(ttk.Frame):
                 self.combo_productos.current(pos)
                 break
 
+    def _construir_items_crudos(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "id_producto": _a_entero_o_cero(it["id_producto"]),
+                "codigo": str(it["codigo"]),
+                "descripcion": str(it["descripcion"]),
+                "cantidad": _a_entero_o_cero(it["cantidad"]),
+                "precio_lista": _a_flotante_o_cero(it["precio_unitario"]),
+                "descuento_pct": _a_flotante_o_cero(it["descuento_pct"]),
+            }
+            for it in self.items_factura
+        ]
+
     def _refrescar_tabla_y_totales(self) -> None:
         """Refresca la tabla exclusiva de productos y recalcula totales."""
         for fila in self.tabla.get_children():
@@ -650,34 +726,82 @@ class InterfazFacturacion(ttk.Frame):
             )
             self.item_id_por_fila[iid] = idx
 
-        self._recalcular_totales()
+        self._recalcular_totales(desde_medio_pago=False)
 
-    def _recalcular_totales(self) -> None:
-        """Calcula subtotal de productos, bonificaciones, recargos, impuestos y total."""
-        subtotal_prod = sum(
-            _a_flotante_o_cero(it.get("subtotal")) for it in self.items_factura
-        )
-        bonif_pct = max(0.0, _a_flotante_o_cero(self.var_bonificacion_pct.get()))
-        recargo_pct = max(0.0, _a_flotante_o_cero(self.var_recargo_pct.get()))
-        imp_pct = max(0.0, _a_flotante_o_cero(self.var_impuesto_pct.get()))
+    def _recalcular_totales(self, desde_medio_pago: bool = False) -> None:
+        """
+        Alinea la previsualización con RepositorioVentas.calcular_previsualizacion_factura
+        y mantiene sincronizados los porcentajes y montos en pantalla.
+        """
+        if self._actualizando_campos:
+            return
 
-        bonif_monto = subtotal_prod * (bonif_pct / 100.0)
-        recargo_monto = subtotal_prod * (recargo_pct / 100.0)
-        base_neta = max(0.0, subtotal_prod - bonif_monto + recargo_monto)
-        impuestos_monto = base_neta * (imp_pct / 100.0)
-        total_final = base_neta + impuestos_monto
+        medio_pago = self.var_medio_pago.get().strip() or MEDIOS_PAGO[0]
+        if not self.items_factura:
+            self._ultimo_calculo_repo = None
+            self.var_subtotal_prod.set("$0.00")
+            self.var_bonificacion_monto.set("-$0.00")
+            self.var_recargo_monto.set("+$0.00")
+            self.var_impuestos_monto.set("$0.00")
+            self.var_total_final.set("$0.00")
+            return
 
-        self.var_subtotal_prod.set(f"${subtotal_prod:,.2f}")
-        self.var_bonificacion_monto.set(f"-${bonif_monto:,.2f}")
-        self.var_recargo_monto.set(f"+${recargo_monto:,.2f}")
-        self.var_impuestos_monto.set(f"${impuestos_monto:,.2f}")
-        self.var_total_final.set(f"${total_final:,.2f}")
+        try:
+            calculo = RepositorioVentas.calcular_previsualizacion_factura(
+                self._construir_items_crudos(),
+                medio_pago,
+            )
+            self._ultimo_calculo_repo = calculo
+            subtotal_prod = _a_flotante_o_cero(calculo.get("subtotal_items"))
+            ajuste_cond = _a_flotante_o_cero(calculo.get("ajuste_condicion_monto"))
+            imp_prov = _a_flotante_o_cero(calculo.get("impuesto_provincial_total"))
+            iva_tot = _a_flotante_o_cero(calculo.get("iva_total"))
+            total_repo = _a_flotante_o_cero(calculo.get("total"))
+
+            if desde_medio_pago and subtotal_prod > 0:
+                bonif_pct = round((max(0.0, ajuste_cond) / subtotal_prod) * 100.0, 2)
+                recargo_pct = round(
+                    (abs(min(0.0, ajuste_cond)) / subtotal_prod) * 100.0, 2
+                )
+                imp_pct = round(((imp_prov + iva_tot) / subtotal_prod) * 100.0, 2)
+                self._actualizando_campos = True
+                try:
+                    self.var_bonificacion_pct.set(f"{bonif_pct:.2f}")
+                    self.var_recargo_pct.set(f"{recargo_pct:.2f}")
+                    self.var_impuesto_pct.set(f"{imp_pct:.2f}")
+                finally:
+                    self._actualizando_campos = False
+
+            bonif_pct_ui = _a_flotante_o_cero(self.var_bonificacion_pct.get())
+            recargo_pct_ui = _a_flotante_o_cero(self.var_recargo_pct.get())
+            imp_pct_ui = _a_flotante_o_cero(self.var_impuesto_pct.get())
+
+            bonif_monto = round(subtotal_prod * (bonif_pct_ui / 100.0), 2)
+            recargo_monto = round(subtotal_prod * (recargo_pct_ui / 100.0), 2)
+            base_imponible = max(0.0, subtotal_prod - bonif_monto + recargo_monto)
+            impuestos_tot = round(base_imponible * (imp_pct_ui / 100.0), 2)
+
+            if desde_medio_pago and total_repo > 0:
+                bonif_monto = round(max(0.0, ajuste_cond), 2)
+                recargo_monto = round(abs(min(0.0, ajuste_cond)), 2)
+                impuestos_tot = round(imp_prov + iva_tot, 2)
+                total_final = round(total_repo, 2)
+            else:
+                total_final = round(base_imponible + impuestos_tot, 2)
+
+            self.var_subtotal_prod.set(f"${subtotal_prod:,.2f}")
+            self.var_bonificacion_monto.set(f"-${bonif_monto:,.2f}")
+            self.var_recargo_monto.set(f"+${recargo_monto:,.2f}")
+            self.var_impuestos_monto.set(f"${impuestos_tot:,.2f}")
+            self.var_total_final.set(f"${total_final:,.2f}")
+        except Exception:
+            self._ultimo_calculo_repo = None
 
     def _construir_texto_comprobante(self, nro_comprobante: str = "BORRADOR") -> str:
         """Genera un resumen legible del comprobante para vista previa / impresión."""
         lineas = [
             "FRANKIE GESTOR COMERCIAL - COMPROBANTE DE VENTA",
-            f"Comprobante: {nro_comprobante} | Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            f"Comprobante: {nro_comprobante}",
             f"Cliente: {self.var_cliente.get() or '-'}",
             f"Vendedor: {self.var_vendedor.get() or '-'}",
             f"Medio de pago: {self.var_medio_pago.get() or MEDIOS_PAGO[0]}",
@@ -692,9 +816,9 @@ class InterfazFacturacion(ttk.Frame):
             [
                 "-" * 52,
                 f"Subtotal productos: {self.var_subtotal_prod.get()}",
-                f"Bonificación ({self.var_bonificacion_pct.get()}%): {self.var_bonificacion_monto.get()}",
-                f"Recargo ({self.var_recargo_pct.get()}%): {self.var_recargo_monto.get()}",
-                f"Impuestos ({self.var_impuesto_pct.get()}%): {self.var_impuestos_monto.get()}",
+                f"Bonificación: {self.var_bonificacion_monto.get()}",
+                f"Recargo: {self.var_recargo_monto.get()}",
+                f"Impuestos: {self.var_impuestos_monto.get()}",
                 f"TOTAL A PAGAR: {self.var_total_final.get()}",
             ]
         )
@@ -719,8 +843,32 @@ class InterfazFacturacion(ttk.Frame):
         txt.insert("1.0", texto)
         txt.configure(state="disabled")
 
+    def limpiar_comprobante(self) -> None:
+        """Limpia el detalle de productos, campos de ítem y reinicia totales."""
+        self.items_factura.clear()
+        self.indice_item_edicion = None
+        self._ultimo_calculo_repo = None
+        self.var_cantidad.set("1")
+        self.var_descuento_item.set("0.0")
+        self._actualizando_campos = True
+        try:
+            self.var_bonificacion_pct.set("0.0")
+            self.var_recargo_pct.set("0.0")
+            self.var_impuesto_pct.set("21.0")
+        finally:
+            self._actualizando_campos = False
+        self._refrescar_tabla_y_totales()
+
     def emitir_factura(self) -> None:
         """Valida selección y emite la factura a través de RepositorioVentas."""
+        if not self.puede_emitir_factura:
+            messagebox.showwarning(
+                "Acceso restringido",
+                "Tu rol actual no tiene permisos para emitir facturas.",
+                parent=self,
+            )
+            return
+
         if not self.items_factura:
             messagebox.showwarning(
                 "Sin productos",
@@ -738,82 +886,59 @@ class InterfazFacturacion(ttk.Frame):
             return
         if idx_vend < 0 or idx_vend >= len(self.vendedores_disponibles):
             messagebox.showwarning(
-                "Vendedor requerido", "Seleccioná un vendedor activo.", parent=self
+                "Vendedor requerido", "Seleccioná un vendedor.", parent=self
             )
             return
 
-        id_cliente = _a_entero_o_cero(self.clientes_disponibles[idx_cli]["id"])
-        vend = self.vendedores_disponibles[idx_vend]
-        id_vendedor = _a_entero_o_cero(vend.get("id_empleado") or vend.get("id"))
-        medio_pago = self.var_medio_pago.get().strip() or MEDIOS_PAGO[0]
-
-        subtotal_prod = sum(
-            _a_flotante_o_cero(it.get("subtotal")) for it in self.items_factura
+        id_cliente = _a_entero_o_cero(self.clientes_disponibles[idx_cli].get("id"))
+        vend_sel = self.vendedores_disponibles[idx_vend]
+        id_vendedor = _a_entero_o_cero(
+            vend_sel.get("id_empleado") or vend_sel.get("id")
         )
-        bonif_pct = max(0.0, _a_flotante_o_cero(self.var_bonificacion_pct.get()))
-        recargo_pct = max(0.0, _a_flotante_o_cero(self.var_recargo_pct.get()))
-        imp_pct = max(0.0, _a_flotante_o_cero(self.var_impuesto_pct.get()))
+        medio_pago = self.var_medio_pago.get().strip() or MEDIOS_PAGO[0]
+        items_crudos = self._construir_items_crudos()
 
-        bonif_monto = subtotal_prod * (bonif_pct / 100.0)
-        recargo_monto = subtotal_prod * (recargo_pct / 100.0)
-        base_neta = max(0.0, subtotal_prod - bonif_monto + recargo_monto)
-        impuestos_monto = base_neta * (imp_pct / 100.0)
-        total_final = round(base_neta + impuestos_monto, 2)
-
-        items_crudos = [
-            {
-                "id_producto": _a_entero_o_cero(it["id_producto"]),
-                "codigo": str(it["codigo"]),
-                "descripcion": str(it["descripcion"]),
-                "cantidad": _a_entero_o_cero(it["cantidad"]),
-                "precio_lista": _a_flotante_o_cero(it["precio_unitario"]),
-                "descuento": _a_flotante_o_cero(it["descuento_pct"]),
-                "medio_pago": medio_pago,
-            }
-            for it in self.items_factura
-        ]
+        if not messagebox.askyesno(
+            "Confirmar Emisión",
+            f"¿Confirmás la emisión de la factura por {self.var_total_final.get()}?",
+            parent=self,
+        ):
+            return
 
         try:
-            factura = RepositorioVentas.emitir_factura(
-                id_cliente,
-                id_vendedor,
-                medio_pago,
-                items_crudos,
+            resultado = RepositorioVentas.emitir_factura(
+                id_cliente=id_cliente,
+                id_vendedor=id_vendedor,
+                condicion_venta=medio_pago,
+                items_crudos=items_crudos,
             )
-            nro_fac = str(
-                getattr(factura, "id_factura", None)
-                or getattr(factura, "id", None)
-                or "OK"
-            )
-            self.ultimo_resumen_impresion = self._construir_texto_comprobante(
-                f"#{nro_fac}"
-            )
-            messagebox.showinfo(
-                "Factura emitida",
-                f"Comprobante #{nro_fac} emitido correctamente.\n"
-                f"Medio de pago: {medio_pago}\n"
-                f"Total: ${total_final:,.2f}",
+        except Exception as exc:
+            messagebox.showerror(
+                "Error al emitir factura",
+                str(exc),
                 parent=self,
             )
-            self.limpiar_comprobante()
-            self.cargar_datos_iniciales()
-        except Exception as exc:
-            messagebox.showerror("Error al emitir factura", str(exc), parent=self)
+            return
 
-    def limpiar_comprobante(self) -> None:
-        """Reinicia los ítems, totales y campos de edición del comprobante."""
-        self.items_factura.clear()
-        self.indice_item_edicion = None
-        self.var_cantidad.set("1")
-        self.var_descuento_item.set("0.0")
-        self.var_bonificacion_pct.set("0.0")
-        self.var_recargo_pct.set("0.0")
-        self._refrescar_tabla_y_totales()
+        id_fact = getattr(resultado, "id_factura", None)
+        nro_comp = f"FAC-{id_fact}" if id_fact is not None else "EMITIDA"
+
+        self.ultimo_resumen_impresion = self._construir_texto_comprobante(
+            nro_comprobante=nro_comp
+        )
+        self.limpiar_comprobante()
+        self._recargar_productos()
+
+        messagebox.showinfo(
+            "Factura Emitida",
+            f"Comprobante registrado correctamente ({nro_comp}).",
+            parent=self,
+        )
 
 
 if __name__ == "__main__":
     root = tk.Tk()
-    root.title("Frankie Gestor - Facturación")
-    root.geometry("1180x760")
+    root.title("Frankie Gestor - Facturación y Ventas")
+    root.geometry("1150x740")
     InterfazFacturacion(root)
     root.mainloop()

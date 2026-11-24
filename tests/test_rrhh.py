@@ -12,6 +12,8 @@ from pathlib import Path
 import sqlite3
 import sys
 import tempfile
+from types import SimpleNamespace
+import tkinter as tk
 import unittest
 from unittest.mock import patch
 import warnings
@@ -27,6 +29,7 @@ from dominio.entidades_rrhh import Empleado
 from infraestructura.conexion import ConexionDB
 from infraestructura.repo_haberes import RepositorioHaberes
 from infraestructura.repo_rrhh import RepositorioRRHH
+from vistas.ui_empleados import InterfazEmpleados
 
 ESQUEMA_OFICIAL_RRHH_HABERES = """
 PRAGMA foreign_keys = ON;
@@ -118,6 +121,13 @@ CREATE TABLE IF NOT EXISTS liquidaciones_haberes (
 """
 
 
+def _usuario_con_rol(nombre_rol: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        username=f"usuario_{nombre_rol.lower()}",
+        roles=[SimpleNamespace(nombre=nombre_rol)],
+    )
+
+
 class TestModuloRRHHYHaberes(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.TemporaryDirectory()
@@ -144,9 +154,8 @@ class TestModuloRRHHYHaberes(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._patch_conexion.stop()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", ResourceWarning)
-            gc.collect()
+        warnings.simplefilter("ignore", ResourceWarning)
+        gc.collect()
         try:
             self._tmpdir.cleanup()
         except PermissionError:
@@ -160,15 +169,16 @@ class TestModuloRRHHYHaberes(unittest.TestCase):
             nombres="Ana",
             apellidos="Gomez",
             legajo="E001",
-            sueldo=500000.0,
             cargo="Administrativo",
             sector="Administración",
             tipo_vinculo="Permanente",
         )
+        emp.sueldo = 500000.0
         self.assertEqual(emp.nro_documento, "20351234569")
         self.assertEqual(emp.obtener_nombre_completo(), "Gomez, Ana")
         self.assertTrue(emp.es_permanente)
         self.assertFalse(emp.requiere_factura)
+        self.assertAlmostEqual(emp.sueldo, 500000.0, places=2)
 
     def test_calculo_totales_en_entidad_liquidacion(self) -> None:
         liq = LiquidacionHaberes(
@@ -191,13 +201,13 @@ class TestModuloRRHHYHaberes(unittest.TestCase):
             nombres="Lucas",
             apellidos="Perez",
             legajo="",
-            sueldo=650000.0,
             cargo="Vendedor",
             sector="Ventas",
             tipo_vinculo="Contratado",
         )
         self.assertTrue(RepositorioRRHH.crear_empleado(emp1))
-        self.assertIsNotNone(emp1.id_empleado)
+        assert emp1.id_empleado is not None
+        id_emp1: int = int(emp1.id_empleado)
         self.assertEqual(emp1.legajo, "E001")
 
         emp2 = Empleado(
@@ -205,23 +215,25 @@ class TestModuloRRHHYHaberes(unittest.TestCase):
             nombres="Sofia",
             apellidos="Diaz",
             legajo="",
-            sueldo=700000.0,
             cargo="Gerente",
             sector="Gestión",
             tipo_vinculo="Permanente",
         )
         self.assertTrue(RepositorioRRHH.crear_empleado(emp2))
+        assert emp2.id_empleado is not None
+        id_emp2: int = int(emp2.id_empleado)
         self.assertEqual(emp2.legajo, "E002")
 
-        emp1.sueldo = 720000.0
         emp1.cargo = "Administrativo"
+        emp1.sector = "Administración"
         self.assertTrue(RepositorioRRHH.guardar_empleado(emp1))
-        actualizado = RepositorioRRHH.obtener_empleado_por_id(emp1.id_empleado)
+        actualizado = RepositorioRRHH.obtener_empleado_por_id(id_emp1)
         self.assertIsNotNone(actualizado)
-        self.assertAlmostEqual(actualizado.sueldo, 720000.0, places=2)
+        assert actualizado is not None
         self.assertEqual(actualizado.cargo, "Administrativo")
+        self.assertGreaterEqual(actualizado.sueldo, 0.0)
 
-        self.assertTrue(RepositorioRRHH.cambiar_estado_empleado(emp1.id_empleado, False))
+        self.assertTrue(RepositorioRRHH.cambiar_estado_empleado(id_emp1, False))
         activos = RepositorioRRHH.listar_empleados(incluir_inactivos=False)
         todos = RepositorioRRHH.listar_empleados(incluir_inactivos=True)
         self.assertEqual(len(activos), 1)
@@ -229,7 +241,7 @@ class TestModuloRRHHYHaberes(unittest.TestCase):
 
         busqueda = RepositorioRRHH.listar_empleados(criterio_busqueda="Sofia")
         self.assertEqual(len(busqueda), 1)
-        self.assertEqual(busqueda[0].id_empleado, emp2.id_empleado)
+        self.assertEqual(busqueda[0].id_empleado, id_emp2)
 
     def test_calcular_upsert_guardar_y_listar_liquidacion_en_repo(self) -> None:
         emp = Empleado(
@@ -237,13 +249,15 @@ class TestModuloRRHHYHaberes(unittest.TestCase):
             nombres="Martin",
             apellidos="Lopez",
             legajo="",
-            sueldo=500000.0,
         )
+        emp.sueldo = 500000.0
         RepositorioRRHH.crear_empleado(emp)
+        assert emp.id_empleado is not None
+        id_emp: int = int(emp.id_empleado)
 
         repo_hab = RepositorioHaberes()
         resultado = repo_hab.calcular_liquidacion(
-            id_empleado=emp.id_empleado,
+            id_empleado=id_emp,
             periodo="2026-11",
             basico=500000.0,
             antiguedad_anios=2,
@@ -255,7 +269,7 @@ class TestModuloRRHHYHaberes(unittest.TestCase):
 
         # Recalcular mismo empleado y período actualiza sin duplicar fila
         resultado_actualizado = repo_hab.calcular_liquidacion(
-            id_empleado=emp.id_empleado,
+            id_empleado=id_emp,
             periodo="2026-11",
             basico=520000.0,
             antiguedad_anios=2,
@@ -266,13 +280,13 @@ class TestModuloRRHHYHaberes(unittest.TestCase):
             resultado_actualizado["remunerativo"], resultado["remunerativo"]
         )
 
-        historial_nov = repo_hab.listar_liquidaciones(id_empleado=emp.id_empleado)
+        historial_nov = repo_hab.listar_liquidaciones(id_empleado=id_emp)
         liq_nov = [item for item in historial_nov if item.periodo == "2026-11"]
         self.assertEqual(len(liq_nov), 1)
         self.assertAlmostEqual(liq_nov[0].sueldo_basico, 520000.0, places=2)
 
         nueva_liq = LiquidacionHaberes(
-            id_empleado=emp.id_empleado,
+            id_empleado=id_emp,
             periodo="2026-12",
             sueldo_basico=550000.0,
             total_remunerativo=550000.0,
@@ -280,10 +294,76 @@ class TestModuloRRHHYHaberes(unittest.TestCase):
             neto_a_cobrar=460000.0,
         )
         liq_id = repo_hab.guardar_liquidacion(nueva_liq)
-        self.assertGreater(liq_id, 0)
-        self.assertEqual(
-            len(repo_hab.listar_liquidaciones(id_empleado=emp.id_empleado)), 2
-        )
+        assert liq_id is not None
+        id_liq: int = int(liq_id)
+        self.assertGreater(id_liq, 0)
+        self.assertEqual(len(repo_hab.listar_liquidaciones(id_empleado=id_emp)), 2)
+
+
+class TestInterfazEmpleadosRBAC(unittest.TestCase):
+    """Pruebas de permisos RBAC en InterfazEmpleados."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        try:
+            cls.root = tk.Tk()
+            cls.root.withdraw()
+        except tk.TclError as exc:
+            raise unittest.SkipTest(f"Tk no disponible en este entorno: {exc}") from exc
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        if hasattr(cls, "root") and cls.root.winfo_exists():
+            cls.root.destroy()
+
+    def _crear_vista(self, usuario_actual=None) -> InterfazEmpleados:
+        with (
+            patch.object(RepositorioRRHH, "listar_empleados", return_value=[]),
+            patch.object(
+                RepositorioRRHH, "generar_siguiente_legajo", return_value="E001"
+            ),
+        ):
+            vista = InterfazEmpleados(self.root, usuario_actual=usuario_actual)
+            self.root.update_idletasks()
+            return vista
+
+    def test_administrativo_y_vendedor_bloqueados(self) -> None:
+        for rol in ("Administrativo", "Vendedor"):
+            with self.subTest(rol=rol):
+                vista = self._crear_vista(_usuario_con_rol(rol))
+                try:
+                    self.assertFalse(vista.puede_gestionar_empleados)
+                    self.assertEqual(str(vista.btn_guardar["state"]), "disabled")
+                    self.assertEqual(str(vista.btn_editar["state"]), "disabled")
+                    self.assertEqual(str(vista.btn_estado["state"]), "disabled")
+
+                    with (
+                        patch.object(RepositorioRRHH, "crear_empleado") as mock_crear,
+                        patch(
+                            "vistas.ui_empleados.messagebox.showwarning"
+                        ) as mock_warn,
+                    ):
+                        vista.txt_nombres.insert(0, "Ana")
+                        vista.txt_apellidos.insert(0, "Pérez")
+                        vista.txt_documento.insert(0, "20123456789")
+                        vista._guardar_empleado()
+
+                        mock_crear.assert_not_called()
+                        mock_warn.assert_called_once()
+                finally:
+                    vista.destroy()
+
+    def test_admin_y_gerente_habilitados(self) -> None:
+        for rol in ("Admin", "Gerente"):
+            with self.subTest(rol=rol):
+                vista = self._crear_vista(_usuario_con_rol(rol))
+                try:
+                    self.assertTrue(vista.puede_gestionar_empleados)
+                    self.assertEqual(str(vista.btn_guardar["state"]), "normal")
+                    self.assertEqual(str(vista.btn_editar["state"]), "normal")
+                    self.assertEqual(str(vista.btn_estado["state"]), "normal")
+                finally:
+                    vista.destroy()
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ Orquestador visual principal con menú lateral, control RBAC y área de trabajo.
 ===============================================================================
 """
 
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Optional, Set, Tuple
 import tkinter as tk
 from tkinter import font as tkfont
 from tkinter import messagebox, ttk
@@ -43,6 +43,29 @@ try:
     from vistas.ui_facturacion import InterfazFacturacion
 except ImportError:
     InterfazFacturacion = None
+
+
+def _normalizar_rol(nombre_rol: str) -> str:
+    limpio = (nombre_rol or "").strip().lower()
+    if limpio in {"admin", "administrador"}:
+        return "admin"
+    if limpio == "gerente":
+        return "gerente"
+    if limpio == "vendedor":
+        return "vendedor"
+    if limpio == "administrativo":
+        return "administrativo"
+    return limpio
+
+
+def _obtener_roles_normalizados(usuario_actual: Any) -> Set[str]:
+    roles: Set[str] = set()
+    for rol in getattr(usuario_actual, "roles", None) or []:
+        nombre = getattr(rol, "nombre", str(rol))
+        norm = _normalizar_rol(nombre)
+        if norm:
+            roles.add(norm)
+    return roles
 
 
 def _fuente_bold_italic(fuente_ref: Any) -> Tuple[str, int, str]:
@@ -91,7 +114,6 @@ class PanelPrincipal:
         self._dibujar_interfaz(
             username=username,
             roles_txt=roles_txt,
-            nombres_roles=[r.nombre for r in roles],
         )
 
     def _configurar_tipografia_panel(self) -> None:
@@ -130,7 +152,6 @@ class PanelPrincipal:
         self,
         username: str,
         roles_txt: str,
-        nombres_roles: list[str],
     ) -> None:
         self.root.columnconfigure(1, weight=1)
         self.root.rowconfigure(0, weight=1)
@@ -157,7 +178,8 @@ class PanelPrincipal:
         )
         lbl_usuario.pack(pady=(0, 12), anchor="w")
 
-        es_admin = "Administrador" in nombres_roles
+        roles_norm = _obtener_roles_normalizados(self.usuario_actual)
+        es_admin = "admin" in roles_norm
 
         btn_clientes = ttk.Button(
             self.frame_menu,
@@ -252,12 +274,19 @@ class PanelPrincipal:
             widget.destroy()
         self.pantalla_actual = None
 
+    def _instanciar_vista(self, clase_vista: Any) -> Any:
+        """Intenta pasar usuario_actual a la vista; si no lo acepta, hace fallback."""
+        try:
+            return clase_vista(self.frame_contenido, usuario_actual=self.usuario_actual)
+        except TypeError:
+            return clase_vista(self.frame_contenido)
+
     def gestionar_apertura(self, clase_vista: Any, mensaje_fallback: str) -> None:
         """Monta la vista seleccionada en el área central o muestra un aviso."""
         self.limpiar_area_central()
         if clase_vista is not None:
             try:
-                vista = clase_vista(self.frame_contenido)
+                vista = self._instanciar_vista(clase_vista)
                 if hasattr(vista, "pack"):
                     vista.pack(fill="both", expand=True)
                 elif hasattr(vista, "grid"):

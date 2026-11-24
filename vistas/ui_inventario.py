@@ -3,14 +3,17 @@
 MÓDULO DE INTERFAZ DE USUARIO: CONTROL DE INVENTARIO Y STOCK (vistas/ui_inventario.py)
 ===============================================================================
 Permite administrar el inventario de productos, actualizar existencias/datos,
-ajustar stock y visualizar alertas de reposición.
+ajustar stock, visualizar alertas de reposición y emitir órdenes de compra
+cuando un producto está en o por debajo de su stock mínimo.
 - Patrón visual apilado: formulario arriba, tabla abajo.
-- Botonera estándar: Guardar, Actualizar, Limpiar, Deshabilitar.
+- Botonera estándar: Guardar, Actualizar, Limpiar, Deshabilitar + Emitir OC.
+- Control RBAC para operaciones de alta, actualización, emisión y estado.
 - Tipografía 12 pt sin itálicas (slant='roman').
 ===============================================================================
 """
 
-from typing import Any, cast, Dict, List, Literal, Optional, Tuple
+from datetime import datetime
+from typing import Any, cast, Dict, List, Literal, Optional, Set, Tuple
 import tkinter as tk
 from tkinter import font as tkfont
 from tkinter import messagebox, ttk
@@ -24,16 +27,41 @@ except ImportError:
     RepositorioProveedores = None
 
 try:
-    from vistas.ui_estilos import aplicar_estilos_base
+    from vistas.estilos import aplicar_estilos_base
 except ImportError:
     try:
-        from vistas.estilos import aplicar_estilos_base
+        from vistas.ui_estilos import aplicar_estilos_base
     except ImportError:
         aplicar_estilos_base = None
 
 TAMANIO_FUENTE = 12
 ALTO_FILA_TABLA = 34
 AnchorTk = Literal["nw", "n", "ne", "w", "center", "e", "sw", "s", "se"]
+
+ROLES_GESTION_INVENTARIO: Set[str] = {"admin", "gerente"}
+
+
+def _normalizar_rol(nombre_rol: str) -> str:
+    limpio = (nombre_rol or "").strip().lower()
+    if limpio in {"admin", "administrador"}:
+        return "admin"
+    if limpio == "gerente":
+        return "gerente"
+    if limpio == "vendedor":
+        return "vendedor"
+    if limpio == "administrativo":
+        return "administrativo"
+    return limpio
+
+
+def _obtener_roles_normalizados(usuario_actual: Any) -> Set[str]:
+    roles: Set[str] = set()
+    for rol in getattr(usuario_actual, "roles", None) or []:
+        nombre = getattr(rol, "nombre", str(rol))
+        norm = _normalizar_rol(nombre)
+        if norm:
+            roles.add(norm)
+    return roles
 
 
 def _a_entero_opcional(valor: Any) -> Optional[int]:
@@ -42,6 +70,8 @@ def _a_entero_opcional(valor: Any) -> Optional[int]:
         return None
     if isinstance(valor, int):
         return valor
+    if isinstance(valor, float):
+        return int(valor)
     if isinstance(valor, str):
         texto = valor.strip()
         if not texto:
@@ -79,8 +109,22 @@ def _a_flotante_o_cero(valor: Any) -> float:
 class InterfazInventario(ttk.Frame):
     """Vista modular para gestión de inventario y stock con patrón apilado."""
 
-    def __init__(self, parent: tk.Misc, *args: Any, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        parent: tk.Misc,
+        usuario_actual: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(parent, *args, **kwargs)
+        self.usuario_actual = usuario_actual
+        roles_activos = _obtener_roles_normalizados(usuario_actual)
+        self.puede_gestionar_inventario: bool = (
+            True
+            if usuario_actual is None
+            else bool(roles_activos & ROLES_GESTION_INVENTARIO)
+        )
+
         if callable(aplicar_estilos_base):
             try:
                 aplicar_estilos_base(self.winfo_toplevel())
@@ -95,6 +139,7 @@ class InterfazInventario(ttk.Frame):
         self.proveedores_map: Dict[str, int] = {}
         self.proveedores_por_id: Dict[int, str] = {}
         self.productos_cache: Dict[str, Producto] = {}
+        self.ordenes_compra_generadas: List[Dict[str, Any]] = []
 
         self.var_proveedor = tk.StringVar()
         self.var_codigo = tk.StringVar()
@@ -111,8 +156,18 @@ class InterfazInventario(ttk.Frame):
 
         self._construir_interfaz()
         self._configurar_fuentes()
+        self._aplicar_permisos_ui()
         self.cargar_proveedores()
         self.cargar_datos()
+
+    def _aplicar_permisos_ui(self) -> None:
+        """Habilita o bloquea acciones de escritura según el rol del usuario."""
+        estado_escritura = "normal" if self.puede_gestionar_inventario else "disabled"
+        self.btn_guardar.config(state=estado_escritura)
+        self.btn_emitir_oc.config(state=estado_escritura)
+        if not self.puede_gestionar_inventario:
+            self.btn_actualizar.config(state="disabled")
+            self.btn_toggle_estado.config(state="disabled")
 
     def _configurar_fuentes(self) -> None:
         """Fuerza 12 pt sin itálicas (slant='roman') en fuentes Tk, entradas y ttk."""
@@ -188,8 +243,10 @@ class InterfazInventario(ttk.Frame):
             self, text=" Datos del Producto y Stock ", padding=15
         )
         frame_form.pack(fill="x", padx=5, pady=5)
-        frame_form.columnconfigure(1, weight=1)
-        frame_form.columnconfigure(3, weight=1)
+        frame_form.columnconfigure(0, weight=0)
+        frame_form.columnconfigure(1, weight=1, minsize=130)
+        frame_form.columnconfigure(2, weight=0)
+        frame_form.columnconfigure(3, weight=3, minsize=220)
 
         # Fila 0: Código | Descripción
         ttk.Label(frame_form, text="Código *:").grid(
@@ -254,26 +311,22 @@ class InterfazInventario(ttk.Frame):
             row=3, column=3, sticky="ew", padx=6, pady=5
         )
 
-        # Fila 4: Ubicación | Botonera
-        ttk.Label(frame_form, text="Ubicación:").grid(
-            row=4, column=0, sticky="w", padx=6, pady=5
-        )
-        ttk.Entry(frame_form, textvariable=self.var_ubicacion).grid(
-            row=4, column=1, sticky="ew", padx=6, pady=5
-        )
-
+        # Fila 4: Botonera principal + Botón Emitir OC
         frame_botones = ttk.Frame(frame_form)
-        frame_botones.grid(row=4, column=2, columnspan=2, sticky="e", padx=6, pady=5)
+        frame_botones.grid(row=4, column=0, columnspan=4, sticky="ew", padx=6, pady=5)
+
+        frame_izq = ttk.Frame(frame_botones)
+        frame_izq.pack(side="left")
 
         self.btn_guardar = ttk.Button(
-            frame_botones,
+            frame_izq,
             text="Guardar",
             command=self.guardar_producto,
         )
         self.btn_guardar.pack(side="left", padx=4)
 
         self.btn_actualizar = ttk.Button(
-            frame_botones,
+            frame_izq,
             text="Actualizar",
             command=self.actualizar_producto,
             state="disabled",
@@ -281,23 +334,30 @@ class InterfazInventario(ttk.Frame):
         self.btn_actualizar.pack(side="left", padx=4)
 
         ttk.Button(
-            frame_botones,
+            frame_izq,
             text="Limpiar",
             command=self.limpiar_formulario,
         ).pack(side="left", padx=4)
 
         self.btn_toggle_estado = ttk.Button(
-            frame_botones,
+            frame_izq,
             text="Deshabilitar",
             command=self.toggle_estado_producto,
             state="disabled",
         )
         self.btn_toggle_estado.pack(side="left", padx=4)
 
+        self.btn_emitir_oc = ttk.Button(
+            frame_botones,
+            text="Emitir OC",
+            command=self.emitir_orden_compra_producto,
+        )
+        self.btn_emitir_oc.pack(side="right", padx=4)
+
         # 2. Tabla inferior apilada: Catálogo de Productos
         frame_tabla = ttk.LabelFrame(
             self,
-            text=" Catálogo de Productos y Stock (Seleccione una fila para actualizar) ",
+            text=" Catálogo de Productos y Stock (Seleccione una fila para actualizar o emitir OC) ",
             padding=15,
         )
         frame_tabla.pack(fill="both", expand=True, padx=5, pady=5)
@@ -373,6 +433,247 @@ class InterfazInventario(ttk.Frame):
         scroll_x.grid(row=1, column=0, sticky="ew")
 
         self.tabla_prod.bind("<<TreeviewSelect>>", self._al_seleccionar_fila)
+
+    def _obtener_producto_objetivo_oc(self) -> Optional[Producto]:
+        """Obtiene el producto seleccionado en tabla/formulario o el primero bajo stock mínimo."""
+        seleccion = self.tabla_prod.selection()
+        if seleccion:
+            prod = self.productos_cache.get(seleccion[0])
+            if prod is not None:
+                return prod
+
+        if self.producto_seleccionado_id is not None:
+            for prod in self.productos_cache.values():
+                if _a_entero_opcional(
+                    getattr(prod, "id_producto", None)
+                ) == self.producto_seleccionado_id:
+                    return prod
+
+        for prod in self.productos_cache.values():
+            stock_act = _a_entero_o_cero(getattr(prod, "stock_actual", 0))
+            stock_min = _a_entero_o_cero(getattr(prod, "stock_minimo", 0))
+            if stock_min > 0 and stock_act <= stock_min:
+                return prod
+
+        codigo = self.var_codigo.get().strip()
+        descripcion = self.var_descripcion.get().strip()
+        if codigo or descripcion:
+            sel_prov = self.var_proveedor.get().strip()
+            id_prov = self.proveedores_map.get(sel_prov, 0)
+            return Producto(
+                id_producto=self.producto_seleccionado_id,
+                codigo=codigo or "SIN-COD",
+                descripcion=descripcion or "Producto",
+                categoria=self.var_categoria.get().strip(),
+                id_proveedor=id_prov,
+                stock_actual=_a_entero_o_cero(self.var_stock.get()),
+                stock_minimo=_a_entero_o_cero(self.var_minimo.get()),
+                precio_costo=_a_flotante_o_cero(self.var_costo.get()),
+                precio_venta=_a_flotante_o_cero(self.var_precio.get()),
+                ubicacion=self.var_ubicacion.get().strip(),
+                activo=self.producto_activo,
+            )
+
+        return None
+
+    def _registrar_orden_compra(
+        self, prod: Producto, stock_actual: int, stock_minimo: int
+    ) -> Tuple[str, int, float]:
+        """
+        Emite y registra una orden de compra para un producto con stock <= stock_minimo.
+        Intenta persistirla en el repositorio si existe un método compatible y siempre
+        guarda el comprobante en self.ordenes_compra_generadas.
+        """
+        cantidad_pedida = max(1, (stock_minimo * 2) - stock_actual)
+        id_prod = _a_entero_o_cero(getattr(prod, "id_producto", 0))
+        id_prov = _a_entero_o_cero(getattr(prod, "id_proveedor", 0))
+        costo_unit = _a_flotante_o_cero(getattr(prod, "precio_costo", 0.0))
+        total_estimado = round(cantidad_pedida * costo_unit, 2)
+        nro_oc = f"OC-{len(self.ordenes_compra_generadas) + 1:04d}"
+
+        orden = {
+            "nro_orden": nro_oc,
+            "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "id_producto": id_prod,
+            "codigo": str(getattr(prod, "codigo", "") or ""),
+            "descripcion": str(getattr(prod, "descripcion", "") or ""),
+            "id_proveedor": id_prov,
+            "proveedor": self.proveedores_por_id.get(id_prov, "Proveedor asignado"),
+            "stock_actual": stock_actual,
+            "stock_minimo": stock_minimo,
+            "cantidad_pedida": cantidad_pedida,
+            "costo_unitario": costo_unit,
+            "total_estimado": total_estimado,
+            "estado": "Emitida",
+        }
+
+        repos_candidatos: List[Any] = [self.repo, RepositorioStock]
+        if RepositorioProveedores is not None:
+            repos_candidatos.append(RepositorioProveedores)
+
+        for repo_obj in repos_candidatos:
+            if repo_obj is None:
+                continue
+            for nombre_metodo in (
+                "crear_orden_compra",
+                "emitir_orden_compra",
+                "generar_orden_compra_reposicion",
+                "generar_orden_compra_automatica",
+                "crear_orden_compra_reposicion",
+                "registrar_orden_compra",
+            ):
+                fn = getattr(repo_obj, nombre_metodo, None)
+                if not callable(fn):
+                    continue
+                for kwargs_intento, args_intento in (
+                    (
+                        {
+                            "id_producto": id_prod,
+                            "id_proveedor": id_prov,
+                            "cantidad": cantidad_pedida,
+                            "precio_unitario": costo_unit,
+                        },
+                        (),
+                    ),
+                    (
+                        {
+                            "id_proveedor": id_prov,
+                            "items": [
+                                {
+                                    "id_producto": id_prod,
+                                    "cantidad": cantidad_pedida,
+                                    "precio_unitario": costo_unit,
+                                }
+                            ],
+                        },
+                        (),
+                    ),
+                    (
+                        {},
+                        (prod, cantidad_pedida),
+                    ),
+                ):
+                    try:
+                        res = fn(*args_intento, **kwargs_intento)
+                        if res is not None and res is not False:
+                            id_res = getattr(res, "id_orden_compra", None) or getattr(
+                                res, "id", None
+                            )
+                            if id_res is not None:
+                                orden["nro_orden"] = f"OC-{id_res}"
+                                nro_oc = orden["nro_orden"]
+                            elif isinstance(res, str) and res.strip():
+                                orden["nro_orden"] = res.strip()
+                                nro_oc = orden["nro_orden"]
+                            break
+                    except TypeError:
+                        continue
+                    except Exception:
+                        continue
+                else:
+                    continue
+                break
+
+        self.ordenes_compra_generadas.append(orden)
+        return nro_oc, cantidad_pedida, total_estimado
+
+    def _mostrar_ventana_orden_compra(self, orden: Dict[str, Any]) -> None:
+        """Abre una ventana de comprobante con el detalle de la orden de compra emitida."""
+        ventana = tk.Toplevel(self)
+        ventana.title(f"Orden de Compra {orden['nro_orden']}")
+        ventana.geometry("540x360")
+
+        detalle = (
+            f"ORDEN DE COMPRA POR REPOSICIÓN\n"
+            f"Número: {orden['nro_orden']}\n"
+            f"Fecha: {orden['fecha']}\n"
+            f"Estado: {orden['estado']}\n"
+            + "-" * 48
+            + f"\nProducto: [{orden['codigo']}] {orden['descripcion']}\n"
+            f"Proveedor: {orden['proveedor']} (ID: {orden['id_proveedor']})\n"
+            f"Stock Actual: {orden['stock_actual']} | Stock Mínimo: {orden['stock_minimo']}\n"
+            f"Cantidad Solicitada: {orden['cantidad_pedida']} unidades\n"
+            f"Costo Unitario: ${orden['costo_unitario']:,.2f}\n"
+            f"Total Estimado: ${orden['total_estimado']:,.2f}\n"
+        )
+
+        txt = tk.Text(ventana, wrap="word", padx=14, pady=14)
+        txt.pack(fill="both", expand=True)
+        txt.insert("1.0", detalle)
+        txt.configure(state="disabled")
+
+    def emitir_orden_compra_producto(self) -> None:
+        """
+        Permite emitir la orden de compra para un producto en o por debajo
+        de su stock mínimo. Si el producto seleccionado tiene stock suficiente,
+        informa y no emite la orden.
+        """
+        if not self.puede_gestionar_inventario:
+            messagebox.showwarning(
+                "Acceso restringido",
+                "Tu rol actual no tiene permisos para emitir órdenes de compra.",
+                parent=self,
+            )
+            return
+
+        prod = self._obtener_producto_objetivo_oc()
+        if prod is None:
+            messagebox.showwarning(
+                "Sin producto",
+                "Seleccioná un producto de la tabla para emitir la orden de compra.",
+                parent=self,
+            )
+            return
+
+        stock_act = _a_entero_o_cero(getattr(prod, "stock_actual", 0))
+        stock_min = _a_entero_o_cero(getattr(prod, "stock_minimo", 0))
+
+        if stock_min <= 0 or stock_act > stock_min:
+            messagebox.showinfo(
+                "Stock suficiente",
+                f"El producto '{prod.descripcion}' tiene stock actual ({stock_act}) "
+                f"por encima del stock mínimo ({stock_min}).\n"
+                "Solo se emiten órdenes de reposición cuando el stock está "
+                "en o por debajo del mínimo.",
+                parent=self,
+            )
+            return
+
+        nro_oc, cant_pedida, total_est = self._registrar_orden_compra(
+            prod, stock_act, stock_min
+        )
+        orden_emitida = self.ordenes_compra_generadas[-1]
+        self._mostrar_ventana_orden_compra(orden_emitida)
+        messagebox.showinfo(
+            "Orden de Compra Emitida",
+            f"Se emitió la orden de compra {nro_oc} para '{prod.descripcion}'\n"
+            f"Stock actual: {stock_act} (Mínimo: {stock_min})\n"
+            f"Cantidad a pedir: {cant_pedida} unidades (Total est.: ${total_est:,.2f}).",
+            parent=self,
+        )
+
+    def _notificar_orden_compra_si_corresponde(
+        self, prod: Producto, mensaje_base: str
+    ) -> None:
+        """Verifica si el producto está en o bajo stock mínimo y emite la orden."""
+        stock_act = _a_entero_o_cero(getattr(prod, "stock_actual", 0))
+        stock_min = _a_entero_o_cero(getattr(prod, "stock_minimo", 0))
+        if stock_min > 0 and stock_act <= stock_min:
+            nro_oc, cant_pedida, total_est = self._registrar_orden_compra(
+                prod, stock_act, stock_min
+            )
+            self._mostrar_ventana_orden_compra(self.ordenes_compra_generadas[-1])
+            messagebox.showinfo(
+                "Orden de Compra Emitida",
+                f"{mensaje_base}\n\n"
+                f"El producto '{prod.descripcion}' está en o por debajo del stock mínimo "
+                f"({stock_act}/{stock_min}).\n"
+                f"Se emitió la orden de compra {nro_oc} por {cant_pedida} unidades "
+                f"(Total est.: ${total_est:,.2f}).",
+                parent=self,
+            )
+        else:
+            messagebox.showinfo("Guardado", mensaje_base, parent=self)
 
     def cargar_proveedores(self) -> None:
         """Carga proveedores activos desde el repositorio correspondiente."""
@@ -528,6 +829,14 @@ class InterfazInventario(ttk.Frame):
 
     def guardar_producto(self) -> None:
         """Registra un nuevo producto en el inventario."""
+        if not self.puede_gestionar_inventario:
+            messagebox.showwarning(
+                "Acceso restringido",
+                "Tu rol actual no tiene permisos para registrar productos.",
+                parent=self,
+            )
+            return
+
         prod = self._construir_producto_desde_formulario(
             id_producto=None, activo=True
         )
@@ -538,10 +847,8 @@ class InterfazInventario(ttk.Frame):
             self.repo.guardar_producto(prod)
             self.limpiar_formulario()
             self.cargar_datos()
-            messagebox.showinfo(
-                "Guardado",
-                "Producto registrado correctamente.",
-                parent=self,
+            self._notificar_orden_compra_si_corresponde(
+                prod, "Producto registrado correctamente."
             )
         except Exception as exc:
             messagebox.showerror(
@@ -550,6 +857,14 @@ class InterfazInventario(ttk.Frame):
 
     def actualizar_producto(self) -> None:
         """Actualiza el producto seleccionado en la tabla conservando su ID."""
+        if not self.puede_gestionar_inventario:
+            messagebox.showwarning(
+                "Acceso restringido",
+                "Tu rol actual no tiene permisos para actualizar productos.",
+                parent=self,
+            )
+            return
+
         if self.producto_seleccionado_id is None:
             messagebox.showwarning(
                 "Sin selección",
@@ -569,10 +884,8 @@ class InterfazInventario(ttk.Frame):
             self.repo.guardar_producto(prod)
             self.limpiar_formulario()
             self.cargar_datos()
-            messagebox.showinfo(
-                "Actualizado",
-                "Producto y stock actualizados correctamente.",
-                parent=self,
+            self._notificar_orden_compra_si_corresponde(
+                prod, "Producto y stock actualizados correctamente."
             )
         except Exception as exc:
             messagebox.showerror(
@@ -581,6 +894,14 @@ class InterfazInventario(ttk.Frame):
 
     def toggle_estado_producto(self) -> None:
         """Deshabilita o reactiva el producto seleccionado."""
+        if not self.puede_gestionar_inventario:
+            messagebox.showwarning(
+                "Acceso restringido",
+                "Tu rol actual no tiene permisos para cambiar el estado de productos.",
+                parent=self,
+            )
+            return
+
         if self.producto_seleccionado_id is None:
             return
 
@@ -618,7 +939,9 @@ class InterfazInventario(ttk.Frame):
         self.var_ubicacion.set("")
         if self.combo_proveedor["values"]:
             self.combo_proveedor.current(0)
-        self.btn_guardar.config(state="normal")
+        self.btn_guardar.config(
+            state="normal" if self.puede_gestionar_inventario else "disabled"
+        )
         self.btn_actualizar.config(state="disabled")
         self.btn_toggle_estado.config(text="Deshabilitar", state="disabled")
         if self.tabla_prod.selection():
@@ -657,16 +980,17 @@ class InterfazInventario(ttk.Frame):
                 self.var_proveedor.set(etiqueta)
                 break
 
-        self.btn_actualizar.config(state="normal")
+        estado_btn = "normal" if self.puede_gestionar_inventario else "disabled"
+        self.btn_actualizar.config(state=estado_btn)
         self.btn_toggle_estado.config(
-            state="normal",
+            state=estado_btn,
             text="Reactivar" if not self.producto_activo else "Deshabilitar",
         )
 
 
 if __name__ == "__main__":
     root = tk.Tk()
-    root.title("Frankie Gestor - Inventario y Gestión de Stock")
+    root.title("Frankie Gestor Comercial - Inventario y Gestión de Stock")
     root.geometry("1180x740")
     InterfazInventario(root)
     root.mainloop()

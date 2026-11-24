@@ -7,10 +7,12 @@ Alta, Listado, Edición y Baja/Reactivación Lógica de clientes (Persona Físic
 - Tabla limpia (sin Consumidor Final ni Frecuente; esos datos van a facturación).
 - Orden alfabético por Apellido y Nombre.
 - Tipografía 12 pt sin itálicas en etiquetas, campos de texto, botones y tabla.
+- Control de permisos por rol: Admin, Gerente y Administrativo pueden editar;
+  Vendedor consulta y selecciona.
 ===============================================================================
 """
 
-from typing import Any, cast, Dict, List, Literal, Optional, Tuple
+from typing import Any, cast, Dict, List, Literal, Optional, Set, Tuple
 import tkinter as tk
 from tkinter import font as tkfont
 from tkinter import messagebox, ttk
@@ -29,6 +31,32 @@ except ImportError:
 TAMANIO_FUENTE = 12
 ALTO_FILA_TABLA = 34
 AnchorTk = Literal["nw", "n", "ne", "w", "center", "e", "sw", "s", "se"]
+ROLES_EDICION_CLIENTES: Set[str] = {"admin", "gerente", "administrativo"}
+
+
+def _normalizar_rol(nombre_rol: str) -> str:
+    """Normaliza el nombre del rol para comparaciones consistentes."""
+    limpio = (nombre_rol or "").strip().lower()
+    if limpio in {"admin", "administrador"}:
+        return "admin"
+    if limpio == "gerente":
+        return "gerente"
+    if limpio == "administrativo":
+        return "administrativo"
+    if limpio == "vendedor":
+        return "vendedor"
+    return limpio
+
+
+def _obtener_roles_normalizados(usuario_actual: Any) -> Set[str]:
+    """Extrae los roles normalizados desde usuario_actual.roles."""
+    roles: Set[str] = set()
+    for rol in getattr(usuario_actual, "roles", None) or []:
+        nombre = getattr(rol, "nombre", str(rol))
+        norm = _normalizar_rol(nombre)
+        if norm:
+            roles.add(norm)
+    return roles
 
 
 def _a_entero_opcional(valor: Any) -> Optional[int]:
@@ -75,8 +103,20 @@ def _clave_alfabetica_fila(fila_info: Dict[str, Any]) -> Tuple[str, str, str]:
 class InterfazClientes(ttk.Frame):
     """Vista modular para administrar el padrón de clientes (Persona Física)."""
 
-    def __init__(self, parent: tk.Misc, *args: Any, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        parent: tk.Misc,
+        usuario_actual: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(parent, *args, **kwargs)
+        self.usuario_actual = usuario_actual
+        roles_activos = _obtener_roles_normalizados(usuario_actual)
+        self.puede_editar_clientes: bool = bool(
+            roles_activos & ROLES_EDICION_CLIENTES
+        )
+
         if callable(aplicar_estilos_base):
             try:
                 aplicar_estilos_base(self.winfo_toplevel())
@@ -103,6 +143,7 @@ class InterfazClientes(ttk.Frame):
 
         self._construir_interfaz()
         self._configurar_fuentes()
+        self._aplicar_permisos_botonera(tiene_seleccion=False)
         self.cargar_tabla_clientes()
 
     def _configurar_fuentes(self) -> None:
@@ -175,6 +216,28 @@ class InterfazClientes(ttk.Frame):
                     pass
             if isinstance(hijo, tk.Misc):
                 self._aplicar_fuente_recursiva(hijo, fuente)
+
+    def _aplicar_permisos_botonera(self, tiene_seleccion: bool) -> None:
+        """Habilita o bloquea acciones de escritura según el rol del usuario."""
+        if not self.puede_editar_clientes:
+            self.btn_guardar.config(state="disabled")
+            self.btn_actualizar.config(state="disabled")
+            self.btn_toggle_estado.config(
+                text="Reactivar" if not self.cliente_estado_activo else "Deshabilitar",
+                state="disabled",
+            )
+            return
+
+        self.btn_guardar.config(state="normal")
+        if tiene_seleccion:
+            self.btn_actualizar.config(state="normal")
+            self.btn_toggle_estado.config(
+                state="normal",
+                text="Reactivar" if not self.cliente_estado_activo else "Deshabilitar",
+            )
+        else:
+            self.btn_actualizar.config(state="disabled")
+            self.btn_toggle_estado.config(text="Deshabilitar", state="disabled")
 
     def _construir_interfaz(self) -> None:
         # 1. Formulario de Datos (2 columnas)
@@ -264,7 +327,7 @@ class InterfazClientes(ttk.Frame):
         # 2. Listado (Tabla Treeview limpia y ordenada alfabéticamente)
         frame_tabla = ttk.LabelFrame(
             self,
-            text=" Padrón de Clientes Registrados (Seleccione una fila para editar o deshabilitar) ",
+            text=" Padrón de Clientes Registrados (Seleccione una fila para consultar o gestionar) ",
             padding=15,
         )
         frame_tabla.pack(fill="both", expand=True, padx=5, pady=5)
@@ -467,6 +530,14 @@ class InterfazClientes(ttk.Frame):
 
     def guardar_cliente(self) -> None:
         """Registra un nuevo cliente (Persona Física) y refresca el padrón."""
+        if not self.puede_editar_clientes:
+            messagebox.showwarning(
+                "Acceso restringido",
+                "Su rol solo permite consultar y seleccionar clientes.",
+                parent=self,
+            )
+            return
+
         cliente = self._construir_entidad_cliente(
             id_cliente=None,
             id_persona=None,
@@ -495,6 +566,14 @@ class InterfazClientes(ttk.Frame):
 
     def actualizar_cliente(self) -> None:
         """Actualiza los datos del cliente seleccionado en la tabla."""
+        if not self.puede_editar_clientes:
+            messagebox.showwarning(
+                "Acceso restringido",
+                "Su rol solo permite consultar y seleccionar clientes.",
+                parent=self,
+            )
+            return
+
         if self.cliente_seleccionado_id is None:
             messagebox.showwarning(
                 "Sin selección",
@@ -529,6 +608,14 @@ class InterfazClientes(ttk.Frame):
 
     def toggle_estado_cliente(self) -> None:
         """Activa o desactiva lógicamente al cliente seleccionado."""
+        if not self.puede_editar_clientes:
+            messagebox.showwarning(
+                "Acceso restringido",
+                "Su rol solo permite consultar y seleccionar clientes.",
+                parent=self,
+            )
+            return
+
         if self.cliente_seleccionado_id is None:
             return
 
@@ -566,9 +653,7 @@ class InterfazClientes(ttk.Frame):
         self.var_telefono.set("")
         self.var_email.set("")
         self.var_direccion.set("")
-        self.btn_guardar.config(state="normal")
-        self.btn_actualizar.config(state="disabled")
-        self.btn_toggle_estado.config(text="Deshabilitar", state="disabled")
+        self._aplicar_permisos_botonera(tiene_seleccion=False)
         if self.tabla.selection():
             self.tabla.selection_remove(self.tabla.selection())
 
@@ -614,11 +699,7 @@ class InterfazClientes(ttk.Frame):
         self.var_email.set(str(getattr(cli, "email", "") or ""))
         self.var_direccion.set(direccion)
 
-        self.btn_actualizar.config(state="normal")
-        self.btn_toggle_estado.config(
-            state="normal",
-            text="Reactivar" if not self.cliente_estado_activo else "Deshabilitar",
-        )
+        self._aplicar_permisos_botonera(tiene_seleccion=True)
 
 
 if __name__ == "__main__":
