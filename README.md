@@ -1,6 +1,9 @@
 # Frankie - Sistema de Gestión Comercial
 
 Sistema de escritorio integral desarrollado en Python bajo los principios de Clean Architecture, diseñado para automatizar y optimizar la administración comercial, control de inventario, padrón de clientes y proveedores, facturación y gestión de recursos humanos en PyMEs.
+Este proyecto es un fork de un trabajo grupal: https://github.com/CFP-Nro-404-Curso-Python/FRANKIE_GESTOR_GRUPAL.git
+
+
 ## Características Principales
 
 ### 1. Inventario y Control de Stock
