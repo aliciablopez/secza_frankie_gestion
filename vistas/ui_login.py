@@ -84,9 +84,9 @@ class VentanaLogin:
     def intentar_login(self) -> None:
         """Valida campos mínimos y solicita autenticación al controlador."""
         username = self.var_usuario.get().strip()
-        password = self.var_password.get().strip()
+        password = self.var_password.get()
 
-        if not username or not password:
+        if not username or not password.strip():
             messagebox.showwarning(
                 "Campos incompletos",
                 "Por favor, ingrese usuario y contraseña.",
@@ -99,7 +99,7 @@ class VentanaLogin:
 
         try:
             usuario_valido = self.on_autenticar(username, password)
-        except Exception as exc:
+        except (RuntimeError, ValueError, OSError) as exc:
             messagebox.showerror(
                 "Error de conexión",
                 f"No se pudo verificar la autenticación: {exc}",

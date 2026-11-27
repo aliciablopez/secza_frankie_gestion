@@ -3,13 +3,16 @@
 REPOSITORIO DE HABERES Y LIQUIDACIONES (infraestructura/repo_haberes.py)
 ===============================================================================
 Estrategia y Buenas Prácticas Aplicadas:
-1. Conexión Centralizada: Utiliza 'ConexionDB' mediante el gestor de contexto (with),
+1. Conexión Centralizada: Utiliza \x27ConexionDB\x27 mediante el gestor de contexto (with),
    garantizando transacciones atómicas seguras, commits automáticos y control de errores.
 2. Configuración Centralizada: Obtiene los porcentajes de aportes/descuentos y
-   parámetros sensibles desde 'config.py' (CONFIG_SISTEMA / constantes) con
+   parámetros sensibles desde \x27config.py\x27 (CONFIG_SISTEMA / constantes) con
    respaldo seguro por defecto.
 3. Sintonizado con la Base de Datos: Persiste directamente en la tabla oficial
-   'liquidaciones_haberes' respetando las claves foráneas y restricciones del proyecto.
+   \x27liquidaciones_haberes\x27 respetando las claves foráneas y restricciones del proyecto.
+4. Regla de Vínculo / Facturación: Si el tipo de vínculo es \x27pasante\x27 o
+   \x27permanente\x27, corresponde recibo de haberes; en cualquier otro caso
+   (con \x27Contratado\x27 por defecto), presenta factura.
 ===============================================================================
 """
 
@@ -22,6 +25,35 @@ try:
     import config as _config
 except ImportError:
     _config = None
+
+
+VINCULO_POR_DEFECTO = "Contratado"
+VINCULOS_RECIBO_HABERES = {"pasante", "permanente", "empleado permanente"}
+
+
+def normalizar_tipo_vinculo(tipo_vinculo: Any) -> str:
+    """Devuelve el tipo de vínculo limpio o \x27Contratado\x27 por defecto."""
+    texto = str(tipo_vinculo or "").strip()
+    return texto if texto else VINCULO_POR_DEFECTO
+
+
+def es_vinculo_recibo_haberes(tipo_vinculo: Any) -> bool:
+    """
+    Devuelve True únicamente si el tipo de vínculo es \x27pasante\x27 o \x27permanente\x27
+    (emite recibo de haberes). En cualquier otro caso (ej. \x27Contratado\x27,
+    \x27Propietario\x27), presenta factura.
+    """
+    vinculo_norm = normalizar_tipo_vinculo(tipo_vinculo).lower()
+    return vinculo_norm in VINCULOS_RECIBO_HABERES
+
+
+def obtener_modalidad_comprobante(tipo_vinculo: Any) -> str:
+    """
+    Indica la modalidad de comprobante según el tipo de vínculo:
+    - \x27Recibo de haberes\x27 si es \x27pasante\x27 o \x27permanente\x27
+    - \x27Presenta factura\x27 en cualquier otro caso (\x27Contratado\x27 por defecto)
+    """
+    return "Recibo de haberes" if es_vinculo_recibo_haberes(tipo_vinculo) else "Presenta factura"
 
 
 def _obtener_parametro(
@@ -46,6 +78,50 @@ class RepositorioHaberes:
     """
 
     @staticmethod
+    def _asegurar_columna_vinculo(cursor: Any) -> None:
+        """Asegura que la tabla liquidaciones_haberes tenga columna tipo_vinculo."""
+        try:
+            columnas = [
+                str(col["name"] if isinstance(col, dict) else col[1]).lower()
+                for col in cursor.execute("PRAGMA table_info(liquidaciones_haberes)").fetchall()
+            ]
+            if columnas and "tipo_vinculo" not in columnas:
+                cursor.execute(
+                    f"ALTER TABLE liquidaciones_haberes ADD COLUMN tipo_vinculo TEXT NOT NULL DEFAULT \x27{VINCULO_POR_DEFECTO}\x27"
+                )
+        except Exception:
+            pass
+
+    @staticmethod
+    def obtener_tipo_vinculo_empleado(id_empleado: int) -> str:
+        """
+        Consulta el tipo de vínculo del empleado en la base de datos.
+        Si no existe la columna o no está informado, devuelve \x27Contratado\x27.
+        """
+        id_emp_seguro = int(id_empleado) if id_empleado is not None else 0
+        if id_emp_seguro <= 0:
+            return VINCULO_POR_DEFECTO
+
+        with ConexionDB() as conexion:
+            cursor = conexion.cursor()
+            cols = [
+                str(col["name"] if isinstance(col, dict) else col[1]).lower()
+                for col in cursor.execute("PRAGMA table_info(empleados)").fetchall()
+            ]
+            if "tipo_vinculo" not in cols:
+                return VINCULO_POR_DEFECTO
+
+            cursor.execute(
+                "SELECT tipo_vinculo FROM empleados WHERE id = ?",
+                (id_emp_seguro,),
+            )
+            fila = cursor.fetchone()
+            if not fila:
+                return VINCULO_POR_DEFECTO
+            valor = fila["tipo_vinculo"] if isinstance(fila, dict) or hasattr(fila, "keys") else fila[0]
+            return normalizar_tipo_vinculo(valor)
+
+    @staticmethod
     def calcular_liquidacion(
         id_empleado: int,
         periodo: str,
@@ -60,10 +136,13 @@ class RepositorioHaberes:
         aplica_pami: bool = True,
         aplica_obra_social: bool = True,
         aplica_sindicato: bool = True,
+        tipo_vinculo: Optional[str] = None,
+        persistir: bool = True,
     ) -> Dict[str, Any]:
         """
         Realiza el cálculo de conceptos remunerativos, deducciones de ley
-        y persiste/actualiza el resultado en la tabla 'liquidaciones_haberes'.
+        y, cuando corresponde recibo de haberes (\x27pasante\x27 o \x27permanente\x27),
+        persiste/actualiza el resultado en la tabla \x27liquidaciones_haberes\x27.
         """
         id_emp_seguro: int = int(id_empleado) if id_empleado is not None else 0
         periodo_limpio: str = (periodo or "").strip()
@@ -73,6 +152,14 @@ class RepositorioHaberes:
         feriados_val: float = max(0.0, float(feriados or 0.0))
         ventas_val: float = max(0.0, float(ventas or 0.0))
         adelanto_val: float = max(0.0, float(adelanto or 0.0))
+
+        vinculo_resuelto = (
+            normalizar_tipo_vinculo(tipo_vinculo)
+            if tipo_vinculo is not None and str(tipo_vinculo).strip()
+            else RepositorioHaberes.obtener_tipo_vinculo_empleado(id_emp_seguro)
+        )
+        emite_recibo = es_vinculo_recibo_haberes(vinculo_resuelto)
+        modalidad_comprobante = obtener_modalidad_comprobante(vinculo_resuelto)
 
         # Parámetros sensibles obtenidos de config.py
         porc_antiguedad = _obtener_parametro(
@@ -145,36 +232,45 @@ class RepositorioHaberes:
         # 4. Neto a Cobrar
         neto_a_cobrar = max(0.0, (total_remunerativo + total_no_remunerativo) - total_descuentos)
 
-        # 5. Persistencia atómica en la tabla oficial 'liquidaciones_haberes'
-        with ConexionDB() as conexion:
-            cursor = conexion.cursor()
-            cursor.execute(
-                """
-                INSERT INTO liquidaciones_haberes (
-                    id_empleado, periodo, sueldo_basico,
-                    total_remunerativo, total_no_remunerativo,
-                    total_descuentos, neto_a_cobrar
+        # 5. Persistencia atómica en la tabla oficial \x27liquidaciones_haberes\x27
+        #    solo si emite recibo de haberes (\x27pasante\x27 o \x27permanente\x27).
+        if persistir and emite_recibo:
+            with ConexionDB() as conexion:
+                cursor = conexion.cursor()
+                RepositorioHaberes._asegurar_columna_vinculo(cursor)
+                cursor.execute(
+                    """
+                    INSERT INTO liquidaciones_haberes (
+                        id_empleado, periodo, tipo_vinculo, sueldo_basico,
+                        total_remunerativo, total_no_remunerativo,
+                        total_descuentos, neto_a_cobrar
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id_empleado, periodo) DO UPDATE SET
+                        tipo_vinculo = excluded.tipo_vinculo,
+                        sueldo_basico = excluded.sueldo_basico,
+                        total_remunerativo = excluded.total_remunerativo,
+                        total_no_remunerativo = excluded.total_no_remunerativo,
+                        total_descuentos = excluded.total_descuentos,
+                        neto_a_cobrar = excluded.neto_a_cobrar;
+                    """,
+                    (
+                        id_emp_seguro,
+                        periodo_limpio,
+                        vinculo_resuelto,
+                        basico_val,
+                        total_remunerativo,
+                        total_no_remunerativo,
+                        total_descuentos,
+                        neto_a_cobrar,
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id_empleado, periodo) DO UPDATE SET
-                    sueldo_basico = excluded.sueldo_basico,
-                    total_remunerativo = excluded.total_remunerativo,
-                    total_no_remunerativo = excluded.total_no_remunerativo,
-                    total_descuentos = excluded.total_descuentos,
-                    neto_a_cobrar = excluded.neto_a_cobrar;
-                """,
-                (
-                    id_emp_seguro,
-                    periodo_limpio,
-                    basico_val,
-                    total_remunerativo,
-                    total_no_remunerativo,
-                    total_descuentos,
-                    neto_a_cobrar,
-                ),
-            )
 
         return {
+            "tipo_vinculo": vinculo_resuelto,
+            "emite_recibo": emite_recibo,
+            "presenta_factura": not emite_recibo,
+            "modalidad_comprobante": modalidad_comprobante,
             "remunerativo": total_remunerativo,
             "no_remunerativo": total_no_remunerativo,
             "descuentos": total_descuentos,
@@ -196,19 +292,30 @@ class RepositorioHaberes:
         id_liq_seguro: int = int(liquidacion.id) if liquidacion.id is not None else 0
         periodo_limpio: str = (liquidacion.periodo or "").strip()
 
+        vinculo_resuelto = normalizar_tipo_vinculo(
+            getattr(liquidacion, "tipo_vinculo", None)
+            or RepositorioHaberes.obtener_tipo_vinculo_empleado(id_emp_seguro)
+        )
+        if not es_vinculo_recibo_haberes(vinculo_resuelto):
+            raise ValueError(
+                f"El vínculo \x27{vinculo_resuelto}\x27 presenta factura y no emite recibo de haberes."
+            )
+
         with ConexionDB() as conexion:
             cursor = conexion.cursor()
+            RepositorioHaberes._asegurar_columna_vinculo(cursor)
 
             if liquidacion.id is None:
                 cursor.execute(
                     """
                     INSERT INTO liquidaciones_haberes (
-                        id_empleado, periodo, sueldo_basico,
+                        id_empleado, periodo, tipo_vinculo, sueldo_basico,
                         total_remunerativo, total_no_remunerativo,
                         total_descuentos, neto_a_cobrar
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id_empleado, periodo) DO UPDATE SET
+                        tipo_vinculo = excluded.tipo_vinculo,
                         sueldo_basico = excluded.sueldo_basico,
                         total_remunerativo = excluded.total_remunerativo,
                         total_no_remunerativo = excluded.total_no_remunerativo,
@@ -218,6 +325,7 @@ class RepositorioHaberes:
                     (
                         id_emp_seguro,
                         periodo_limpio,
+                        vinculo_resuelto,
                         float(liquidacion.sueldo_basico or 0.0),
                         float(liquidacion.total_remunerativo or 0.0),
                         float(liquidacion.total_no_remunerativo or 0.0),
@@ -238,7 +346,7 @@ class RepositorioHaberes:
                 cursor.execute(
                     """
                     UPDATE liquidaciones_haberes
-                    SET id_empleado = ?, periodo = ?, sueldo_basico = ?,
+                    SET id_empleado = ?, periodo = ?, tipo_vinculo = ?, sueldo_basico = ?,
                         total_remunerativo = ?, total_no_remunerativo = ?,
                         total_descuentos = ?, neto_a_cobrar = ?
                     WHERE id_liquidacion = ?;
@@ -246,6 +354,7 @@ class RepositorioHaberes:
                     (
                         id_emp_seguro,
                         periodo_limpio,
+                        vinculo_resuelto,
                         float(liquidacion.sueldo_basico or 0.0),
                         float(liquidacion.total_remunerativo or 0.0),
                         float(liquidacion.total_no_remunerativo or 0.0),

@@ -8,6 +8,7 @@ aplica los estilos globales y cede el control de navegación a ControladorSesion
 """
 
 from pathlib import Path
+import sqlite3
 import sys
 import tkinter as tk
 from tkinter import messagebox
@@ -32,7 +33,7 @@ def _verificar_base_datos(root: tk.Tk) -> bool:
             cursor.execute("SELECT 1;")
             cursor.fetchone()
         return True
-    except Exception as exc:
+    except (sqlite3.Error, OSError, RuntimeError, ValueError) as exc:
         messagebox.showerror(
             "Error de Base de Datos",
             f"No se pudo inicializar o verificar la base de datos:\n{exc}",

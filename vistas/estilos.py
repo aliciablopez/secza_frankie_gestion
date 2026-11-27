@@ -2,135 +2,122 @@
 ===============================================================================
 MÓDULO DE ESTILOS Y ACCESIBILIDAD GLOBAL (vistas/estilos.py)
 ===============================================================================
-Centraliza variables de color y tipografía junto con los estilos de ttk,
-incluyendo carga de fuentes estáticas desde assets/fuentes/ y detección de familia.
+Centraliza variables de color, tipografía, valores por defecto y estilos de ttk
+utilizando fuentes estándar del sistema en estilo normal (sin cursivas).
 ===============================================================================
 """
 
-import ctypes
 from pathlib import Path
 import sys
 import tkinter as tk
 from tkinter import font as tkfont, ttk
+from typing import Final, Literal, Optional
 
 # =============================================================================
-# 1. VARIABLES DE COLOR Y FUENTE (equivalentes a variables CSS)
+# 1. VARIABLES DE COLOR, VALORES POR DEFECTO Y TIPOGRAFÍA (Paleta honeydew)
 # =============================================================================
-COLOR_FONDO = "honeydew"         # Fondo general de ventana y marcos base
-COLOR_TARJETA = "lavenderblush"  # Fondo de contenedores tipo tarjeta (Card.TFrame)
-COLOR_PRIMARIO = "yellowgreen"   # Fondo base de botones y elementos principales
-COLOR_ACCENTO = "lightgreen"     # Resaltado al pasar el cursor / activar (hover/active)
-COLOR_TEXTO = "black"            # Texto principal de alto contraste
-COLOR_TEXTO_MUTED = "#556B2F"    # Texto secundario / notas (darkolivegreen)
-COLOR_FOCO = "azure"             # Fondo al enfocar campos de entrada (focus)
-COLOR_BORDE = "darkolivegreen"   # Bordes de contenedores y controles
+COLOR_FONDO: Final[str] = "honeydew"         # Fondo general de ventana y marcos base
+COLOR_TARJETA: Final[str] = "lavenderblush"  # Fondo de contenedores tipo tarjeta (Card.TFrame)
+COLOR_PRIMARIO: Final[str] = "yellowgreen"   # Fondo base de botones y elementos principales
+COLOR_ACCENTO: Final[str] = "lightgreen"     # Resaltado al pasar el cursor / activar (hover/active)
+COLOR_TEXTO: Final[str] = "black"            # Texto principal de alto contraste
+COLOR_TEXTO_MUTED: Final[str] = "#556B2F"    # Texto secundario / notas (darkolivegreen)
+COLOR_FOCO: Final[str] = "azure"             # Fondo al enfocar campos de entrada (focus)
+COLOR_BORDE: Final[str] = "darkolivegreen"   # Bordes de contenedores y controles
 
-TAMANIO_BASE = 12
-ALTO_FILA_TABLA = 34
+# Valores por defecto configurables desde estilos.py
+IVA_DEFECTO_PORC: Final[float] = 21.0
+IMPUESTO_PROVINCIAL_DEFECTO_PORC: Final[float] = 0.0
+PRECIO_LISTA_DEFECTO: Final[float] = 0.0
+CARPETA_COMPROBANTES_DEFECTO: Final[Path] = Path("comprobantes")
 
-FUENTE_PREFERIDA = "Atkinson Hyperlegible"
-FUENTE_RESPALDO = "Segoe UI" if sys.platform.startswith("win") else "TkDefaultFont"
+TAMANIO_BASE: Final[int] = 12
+TAMANIO_SUBTOTAL: Final[int] = 12
+TAMANIO_TOTAL: Final[int] = 15
+ALTO_FILA_TABLA: Final[int] = 28
 
-FUENTE_FAMILIA = FUENTE_PREFERIDA
-FUENTE_BASE = (FUENTE_FAMILIA, TAMANIO_BASE, "normal")
-FUENTE_BOTON = (FUENTE_FAMILIA, TAMANIO_BASE, "normal")
-FUENTE_TITULO = (FUENTE_FAMILIA, TAMANIO_BASE, "bold")
-FUENTE_ENCABEZADO = (FUENTE_FAMILIA, TAMANIO_BASE, "bold")
+FUENTE_PREFERIDA: Final[str] = "Segoe UI" if sys.platform.startswith("win") else "Arial"
+FUENTE_RESPALDO: Final[str] = "Arial" if sys.platform.startswith("win") else "TkDefaultFont"
 
-_FUENTES_CARGADAS = False
-
-
-def _obtener_carpeta_fuentes() -> Path:
-    """Devuelve la ruta absoluta hacia assets/fuentes/."""
-    ruta_base = Path(__file__).resolve().parents[1]
-    return ruta_base / "assets" / "fuentes"
-
-
-def cargar_fuentes_locales() -> None:
-    """
-    Intenta registrar los archivos .ttf estáticos de assets/fuentes/
-    para el proceso actual sin requerir instalación manual previa.
-    """
-    global _FUENTES_CARGADAS
-    if _FUENTES_CARGADAS:
-        return
-
-    carpeta_fuentes = _obtener_carpeta_fuentes()
-    if not carpeta_fuentes.exists() or not carpeta_fuentes.is_dir():
-        _FUENTES_CARGADAS = True
-        return
-
-    archivos_ttf = sorted(carpeta_fuentes.glob("*.ttf"))
-    if not archivos_ttf:
-        _FUENTES_CARGADAS = True
-        return
-
-    if sys.platform.startswith("win"):
-        # FR_PRIVATE = 0x10: disponible solo para este proceso mientras siga abierto
-        fr_private = 0x10
-        gdi32 = getattr(ctypes, "windll", None)
-        if gdi32 is not None and hasattr(gdi32, "gdi32"):
-            add_font = gdi32.gdi32.AddFontResourceExW
-            for archivo in archivos_ttf:
-                try:
-                    add_font(str(archivo), fr_private, 0)
-                except Exception:
-                    continue
-
-    _FUENTES_CARGADAS = True
+FUENTE_FAMILIA: str = FUENTE_PREFERIDA
+FUENTE_BASE: Optional[tkfont.Font] = None
+FUENTE_BOTON: Optional[tkfont.Font] = None
+FUENTE_TITULO: Optional[tkfont.Font] = None
+FUENTE_ENCABEZADO: Optional[tkfont.Font] = None
+FUENTE_SUBTOTAL: Optional[tkfont.Font] = None
+FUENTE_TOTAL: Optional[tkfont.Font] = None
 
 
 def resolver_familia_fuente(root: tk.Misc) -> str:
     """
-    Detecta si 'Atkinson Hyperlegible' (o una coincidencia cercana) está disponible
-    en Tk; si no lo está, devuelve una familia de respaldo segura.
+    Devuelve una familia estándar limpia (Segoe UI / Arial) evitando fuentes
+    externas que puedan mapearse a variantes cursivas en Windows.
     """
-    cargar_fuentes_locales()
-
     try:
         familias = list(tkfont.families(root))
     except Exception:
         return FUENTE_RESPALDO
 
-    for nombre in familias:
-        if nombre.lower() == FUENTE_PREFERIDA.lower():
-            return nombre
-
-    for nombre in familias:
-        if "atkinson hyperlegible" in nombre.lower() and "next" not in nombre.lower():
-            return nombre
-
-    for nombre in familias:
-        if "atkinson" in nombre.lower():
-            return nombre
+    for candidata in (FUENTE_PREFERIDA, "Segoe UI", "Arial", "Tahoma", "Liberation Sans"):
+        for nombre in familias:
+            if nombre.lower() == candidata.lower():
+                return nombre
 
     return FUENTE_RESPALDO
 
 
-def _actualizar_fuentes_globales(familia: str) -> None:
-    """Actualiza las constantes de fuente con la familia resuelta."""
-    global FUENTE_FAMILIA, FUENTE_BASE, FUENTE_BOTON, FUENTE_TITULO, FUENTE_ENCABEZADO
-    FUENTE_FAMILIA = familia
-    FUENTE_BASE = (FUENTE_FAMILIA, TAMANIO_BASE, "normal")
-    FUENTE_BOTON = (FUENTE_FAMILIA, TAMANIO_BASE, "normal")
-    FUENTE_TITULO = (FUENTE_FAMILIA, TAMANIO_BASE, "bold")
-    FUENTE_ENCABEZADO = (FUENTE_FAMILIA, TAMANIO_BASE, "bold")
+def _crear_o_actualizar_fuente(
+    actual: Optional[tkfont.Font],
+    root: tk.Misc,
+    familia: str,
+    tamano: int,
+    peso: Literal["normal", "bold"] = "normal",
+) -> tkfont.Font:
+    """Crea o actualiza un objeto tkfont.Font garantizando slant='roman'."""
+    if actual is None:
+        return tkfont.Font(
+            root=root,
+            family=familia,
+            size=tamano,
+            weight=peso,
+            slant="roman",
+        )
+    try:
+        actual.configure(
+            family=familia,
+            size=tamano,
+            weight=peso,
+            slant="roman",
+        )
+        return actual
+    except tk.TclError:
+        return tkfont.Font(
+            root=root,
+            family=familia,
+            size=tamano,
+            weight=peso,
+            slant="roman",
+        )
 
 
-def _sincronizar_fuentes_tk(root: tk.Misc) -> None:
-    """Asegura que las fuentes base de Tk no usen cursivas (slant='roman')."""
+def _sincronizar_fuentes_tk(root: tk.Misc, familia: str) -> None:
+    """Sincroniza fuentes base nombradas de Tk en normal y sin cursivas."""
     for nombre_fuente in (
         "TkDefaultFont",
         "TkTextFont",
         "TkMenuFont",
         "TkHeadingFont",
+        "TkCaptionFont",
+        "TkSmallCaptionFont",
+        "TkIconFont",
+        "TkTooltipFont",
     ):
         try:
             f = tkfont.nametofont(nombre_fuente, root=root)
             f.configure(
-                family=FUENTE_FAMILIA,
+                family=familia,
                 size=TAMANIO_BASE,
-                weight="bold" if nombre_fuente == "TkHeadingFont" else "normal",
+                weight="normal",
                 slant="roman",
             )
         except Exception:
@@ -141,9 +128,33 @@ def aplicar_estilos_base(root: tk.Misc) -> None:
     """
     Aplica la hoja de estilos global de ttk sobre la ventana o contenedor raíz.
     """
+    global FUENTE_FAMILIA
+    global FUENTE_BASE, FUENTE_BOTON, FUENTE_TITULO, FUENTE_ENCABEZADO
+    global FUENTE_SUBTOTAL, FUENTE_TOTAL
+
     familia_activa = resolver_familia_fuente(root)
-    _actualizar_fuentes_globales(familia_activa)
-    _sincronizar_fuentes_tk(root)
+    FUENTE_FAMILIA = familia_activa
+
+    FUENTE_BASE = _crear_o_actualizar_fuente(
+        FUENTE_BASE, root, familia_activa, TAMANIO_BASE, "normal"
+    )
+    FUENTE_BOTON = _crear_o_actualizar_fuente(
+        FUENTE_BOTON, root, familia_activa, TAMANIO_BASE, "normal"
+    )
+    FUENTE_TITULO = _crear_o_actualizar_fuente(
+        FUENTE_TITULO, root, familia_activa, TAMANIO_BASE, "normal"
+    )
+    FUENTE_ENCABEZADO = _crear_o_actualizar_fuente(
+        FUENTE_ENCABEZADO, root, familia_activa, TAMANIO_BASE, "normal"
+    )
+    FUENTE_SUBTOTAL = _crear_o_actualizar_fuente(
+        FUENTE_SUBTOTAL, root, familia_activa, TAMANIO_SUBTOTAL, "bold"
+    )
+    FUENTE_TOTAL = _crear_o_actualizar_fuente(
+        FUENTE_TOTAL, root, familia_activa, TAMANIO_TOTAL, "bold"
+    )
+
+    _sincronizar_fuentes_tk(root, familia_activa)
 
     style = ttk.Style(root)
     style.theme_use("clam")
@@ -151,7 +162,6 @@ def aplicar_estilos_base(root: tk.Misc) -> None:
     if isinstance(root, (tk.Tk, tk.Toplevel)):
         root.configure(bg=COLOR_FONDO)
 
-    # Estilo base heredado por los widgets ttk
     style.configure(
         ".",
         background=COLOR_FONDO,
@@ -190,6 +200,18 @@ def aplicar_estilos_base(root: tk.Misc) -> None:
         font=FUENTE_TITULO,
     )
     style.configure(
+        "Subtotal.TLabel",
+        background=COLOR_FONDO,
+        foreground=COLOR_TEXTO,
+        font=FUENTE_SUBTOTAL,
+    )
+    style.configure(
+        "Total.TLabel",
+        background=COLOR_FONDO,
+        foreground=COLOR_TEXTO,
+        font=FUENTE_TOTAL,
+    )
+    style.configure(
         "Muted.TLabel",
         background=COLOR_FONDO,
         foreground=COLOR_TEXTO_MUTED,
@@ -202,7 +224,7 @@ def aplicar_estilos_base(root: tk.Misc) -> None:
         fieldbackground="white",
         foreground=COLOR_TEXTO,
         font=FUENTE_BASE,
-        padding=6,
+        padding=4,
     )
     style.map(
         "TEntry",
@@ -222,7 +244,7 @@ def aplicar_estilos_base(root: tk.Misc) -> None:
         fieldbackground="white",
         foreground=COLOR_TEXTO,
         font=FUENTE_BASE,
-        padding=4,
+        padding=3,
     )
     style.configure(
         "TCheckbutton",
@@ -231,11 +253,11 @@ def aplicar_estilos_base(root: tk.Misc) -> None:
         font=FUENTE_BASE,
     )
 
-    # Botones (TButton): 12 pt sin negrita ni cursiva
+    # Botones (TButton): 12pt normal, sin cursiva
     style.configure(
         "TButton",
         font=FUENTE_BOTON,
-        padding=(12, 8),
+        padding=(9, 5),
         background=COLOR_PRIMARIO,
         foreground=COLOR_TEXTO,
         borderwidth=1,
@@ -258,7 +280,7 @@ def aplicar_estilos_base(root: tk.Misc) -> None:
         ],
     )
 
-    # Tablas (Treeview)
+    # Tablas (Treeview): encabezados y filas en 12pt normal, sin cursiva
     style.configure(
         "Treeview",
         background="white",
@@ -272,11 +294,10 @@ def aplicar_estilos_base(root: tk.Misc) -> None:
         font=FUENTE_ENCABEZADO,
         background=COLOR_PRIMARIO,
         foreground=COLOR_TEXTO,
-        padding=8,
+        padding=5,
     )
     style.map(
         "Treeview",
         background=[("selected", COLOR_ACCENTO)],
         foreground=[("selected", COLOR_TEXTO)],
     )
-    root.option_add("*TCombobox*Listbox.font", FUENTE_BASE)

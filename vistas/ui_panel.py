@@ -6,13 +6,17 @@ Orquestador visual principal con menú lateral, control RBAC y área de trabajo.
 ===============================================================================
 """
 
-from typing import Any, Callable, Optional, Set, Tuple
+from typing import Any, Callable, Optional, Set
 import tkinter as tk
-from tkinter import font as tkfont
 from tkinter import messagebox, ttk
 
 from controladores.controlador_core import ControladorCore
-from vistas.estilos import COLOR_TEXTO, FUENTE_BASE, aplicar_estilos_base
+from vistas.estilos import (
+    COLOR_TEXTO,
+    FUENTE_BASE,
+    FUENTE_TITULO,
+    aplicar_estilos_base,
+)
 
 try:
     from vistas.ui_empleados import InterfazEmpleados
@@ -44,6 +48,11 @@ try:
 except ImportError:
     InterfazFacturacion = None
 
+try:
+    from vistas.ui_usuarios import VistaGestionUsuarios
+except ImportError:
+    VistaGestionUsuarios = None
+
 
 def _normalizar_rol(nombre_rol: str) -> str:
     limpio = (nombre_rol or "").strip().lower()
@@ -65,19 +74,10 @@ def _obtener_roles_normalizados(usuario_actual: Any) -> Set[str]:
         norm = _normalizar_rol(nombre)
         if norm:
             roles.add(norm)
+    username = str(getattr(usuario_actual, "username", "") or "").strip().lower()
+    if username == "admin":
+        roles.add("admin")
     return roles
-
-
-def _fuente_bold_italic(fuente_ref: Any) -> Tuple[str, int, str]:
-    """Construye una tupla de fuente en negrita e itálica a partir de FUENTE_BASE."""
-    familia = "Segoe UI"
-    tamanio = 12
-    if isinstance(fuente_ref, (tuple, list)) and len(fuente_ref) >= 2:
-        familia = str(fuente_ref[0])
-        tamanio = int(fuente_ref[1])
-    elif isinstance(fuente_ref, str) and fuente_ref.strip():
-        familia = fuente_ref.strip()
-    return (familia, tamanio, "bold italic")
 
 
 class PanelPrincipal:
@@ -98,8 +98,6 @@ class PanelPrincipal:
         self.controlador = controlador if controlador is not None else ControladorCore()
 
         aplicar_estilos_base(self.root)
-        self.fuente_panel: Tuple[str, int, str] = _fuente_bold_italic(FUENTE_BASE)
-        self._configurar_tipografia_panel()
 
         roles = getattr(self.usuario_actual, "roles", []) or []
         roles_txt = ", ".join(r.nombre for r in roles) if roles else "Sin Roles"
@@ -115,38 +113,6 @@ class PanelPrincipal:
             username=username,
             roles_txt=roles_txt,
         )
-
-    def _configurar_tipografia_panel(self) -> None:
-        """Aplica negrita e itálica manteniendo la familia y tamaño de FUENTE_BASE."""
-        familia, tamanio, _ = self.fuente_panel
-        try:
-            top = self.root.winfo_toplevel()
-            for nombre in tkfont.names(root=top):
-                try:
-                    f = tkfont.nametofont(nombre, root=top)
-                    f.configure(
-                        family=familia,
-                        size=tamanio,
-                        weight="bold",
-                        slant="italic",
-                    )
-                except Exception:
-                    continue
-
-            estilo = ttk.Style(top)
-            estilo.configure(".", font=self.fuente_panel)
-            estilo.configure("TLabel", font=self.fuente_panel)
-            estilo.configure("Subtitulo.TLabel", font=self.fuente_panel)
-            estilo.configure("Muted.TLabel", font=self.fuente_panel)
-            estilo.configure("TButton", font=self.fuente_panel)
-            estilo.configure("TCheckbutton", font=self.fuente_panel)
-            estilo.configure("TEntry", font=self.fuente_panel)
-            estilo.configure("TCombobox", font=self.fuente_panel)
-            estilo.configure("TLabelframe.Label", font=self.fuente_panel)
-            estilo.configure("Treeview", font=self.fuente_panel)
-            estilo.configure("Treeview.Heading", font=self.fuente_panel)
-        except Exception:
-            pass
 
     def _dibujar_interfaz(
         self,
@@ -166,14 +132,14 @@ class PanelPrincipal:
         lbl_menu = ttk.Label(
             self.frame_menu,
             text="MENÚ",
-            font=self.fuente_panel,
+            style="Subtitulo.TLabel",
         )
         lbl_menu.pack(pady=(10, 4), anchor="w")
 
         lbl_usuario = ttk.Label(
             self.frame_menu,
             text=f"{username} · {roles_txt}",
-            font=self.fuente_panel,
+            style="Muted.TLabel",
             wraplength=190,
         )
         lbl_usuario.pack(pady=(0, 12), anchor="w")
@@ -232,6 +198,13 @@ class PanelPrincipal:
             )
             btn_backup.pack(fill="x", pady=4)
 
+            btn_usuarios = ttk.Button(
+                self.frame_menu,
+                text="Usuarios",
+                command=self.abrir_modulo_usuarios,
+            )
+            btn_usuarios.pack(fill="x", pady=4)
+
         ttk.Separator(self.frame_menu, orient="horizontal").pack(fill="x", pady=10)
 
         btn_salir = ttk.Button(
@@ -257,14 +230,14 @@ class PanelPrincipal:
         ttk.Label(
             tarjeta_bienvenida,
             text=f"Bienvenido/a al Sistema Frankie, {username}",
-            font=self.fuente_panel,
+            font=FUENTE_TITULO,
             justify="center",
         ).pack(pady=(0, 8))
 
         ttk.Label(
             tarjeta_bienvenida,
             text="Seleccione una opción del menú lateral para comenzar.",
-            font=self.fuente_panel,
+            font=FUENTE_BASE,
             justify="center",
         ).pack()
 
@@ -306,7 +279,7 @@ class PanelPrincipal:
             tarjeta,
             text=texto,
             foreground=COLOR_TEXTO,
-            font=self.fuente_panel,
+            font=FUENTE_BASE,
             justify="center",
             wraplength=520,
         )
@@ -350,6 +323,17 @@ class PanelPrincipal:
         self.gestionar_apertura(
             InterfazInventario,
             "Módulo de Inventario no disponible.",
+        )
+
+    def abrir_modulo_usuarios(self) -> None:
+        """Abre el módulo de gestión de usuarios (restringido a admin)."""
+        roles_norm = _obtener_roles_normalizados(self.usuario_actual)
+        if "admin" not in roles_norm:
+            self.mostrar_mensaje_estado("Acceso restringido: solo 'admin' puede administrar usuarios.")
+            return
+        self.gestionar_apertura(
+            VistaGestionUsuarios,
+            "Módulo de Usuarios no disponible.",
         )
 
     def ejecutar_backup(self) -> None:
