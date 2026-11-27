@@ -3,7 +3,7 @@
 MÓDULO DE VISTAS: INTERFAZ DE CLIENTES (vistas/ui_clientes.py)
 ===============================================================================
 Alta, Listado, Edición y Baja/Reactivación Lógica de clientes (Persona Física).
-- Botonera alineada al patrón del sistema: Guardar, Actualizar, Limpiar, Deshabilitar.
+- Botonera alineada al patrón del sistema: Guardar, Limpiar, Deshabilitar.
 - Tabla limpia (sin Consumidor Final ni Frecuente; esos datos van a facturación).
 - Orden alfabético por Apellido y Nombre.
 - Tipografía 12 pt sin itálicas en etiquetas, campos de texto, botones y tabla.
@@ -221,7 +221,6 @@ class InterfazClientes(ttk.Frame):
         """Habilita o bloquea acciones de escritura según el rol del usuario."""
         if not self.puede_editar_clientes:
             self.btn_guardar.config(state="disabled")
-            self.btn_actualizar.config(state="disabled")
             self.btn_toggle_estado.config(
                 text="Reactivar" if not self.cliente_estado_activo else "Deshabilitar",
                 state="disabled",
@@ -230,13 +229,11 @@ class InterfazClientes(ttk.Frame):
 
         self.btn_guardar.config(state="normal")
         if tiene_seleccion:
-            self.btn_actualizar.config(state="normal")
             self.btn_toggle_estado.config(
                 state="normal",
                 text="Reactivar" if not self.cliente_estado_activo else "Deshabilitar",
             )
         else:
-            self.btn_actualizar.config(state="disabled")
             self.btn_toggle_estado.config(text="Deshabilitar", state="disabled")
 
     def _construir_interfaz(self) -> None:
@@ -291,7 +288,7 @@ class InterfazClientes(ttk.Frame):
             row=2, column=3, sticky="ew", padx=6, pady=6
         )
 
-        # Fila 3: Botonera (Guardar, Actualizar, Limpiar, Deshabilitar)
+        # Fila 3: Botonera (Guardar, Limpiar, Deshabilitar)
         frame_botones = ttk.Frame(frame_form)
         frame_botones.grid(row=3, column=0, columnspan=4, sticky="e", pady=(10, 4))
 
@@ -301,14 +298,6 @@ class InterfazClientes(ttk.Frame):
             command=self.guardar_cliente,
         )
         self.btn_guardar.pack(side="left", padx=6)
-
-        self.btn_actualizar = ttk.Button(
-            frame_botones,
-            text="Actualizar",
-            command=self.actualizar_cliente,
-            state="disabled",
-        )
-        self.btn_actualizar.pack(side="left", padx=6)
 
         ttk.Button(
             frame_botones,
@@ -529,7 +518,7 @@ class InterfazClientes(ttk.Frame):
         return cliente
 
     def guardar_cliente(self) -> None:
-        """Registra un nuevo cliente (Persona Física) y refresca el padrón."""
+        """Registra un nuevo cliente o actualiza uno existente y refresca el padrón."""
         if not self.puede_editar_clientes:
             messagebox.showwarning(
                 "Acceso restringido",
@@ -538,70 +527,53 @@ class InterfazClientes(ttk.Frame):
             )
             return
 
+        es_edicion = self.cliente_seleccionado_id is not None
+        id_cliente_objetivo = self.cliente_seleccionado_id
+        id_persona_objetivo = self.persona_seleccionada_id if es_edicion else None
+        estado_objetivo = self.cliente_estado_activo if es_edicion else True
+
         cliente = self._construir_entidad_cliente(
-            id_cliente=None,
-            id_persona=None,
-            activo=True,
+            id_cliente=id_cliente_objetivo,
+            id_persona=id_persona_objetivo,
+            activo=estado_objetivo,
         )
         if cliente is None:
             return
 
         try:
-            RepositorioVentas.guardar_cliente(cliente)
-            self.var_mostrar_inactivos.set(False)
-            self.var_busqueda.set("")
+            resultado = RepositorioVentas.guardar_cliente(cliente)
+            id_guardado = _a_entero_opcional(
+                getattr(cliente, "id_cliente", None)
+            )
+            if id_guardado is None and isinstance(resultado, Cliente):
+                id_guardado = _a_entero_opcional(getattr(resultado, "id_cliente", None))
+            if id_guardado is None:
+                id_guardado = _a_entero_opcional(resultado)
+
+            if not es_edicion:
+                self.var_mostrar_inactivos.set(False)
+                self.var_busqueda.set("")
+
             self.limpiar_formulario()
             self.cargar_tabla_clientes()
-            messagebox.showinfo(
-                "Guardado",
-                f"Cliente registrado correctamente (ID #{cliente.id_cliente}).",
-                parent=self,
-            )
+
+            if es_edicion:
+                detalle_id = f" (ID #{id_guardado})" if id_guardado is not None else ""
+                messagebox.showinfo(
+                    "Guardado",
+                    f"Cliente actualizado correctamente{detalle_id}.",
+                    parent=self,
+                )
+            else:
+                detalle_id = f" (ID #{id_guardado})" if id_guardado is not None else ""
+                messagebox.showinfo(
+                    "Guardado",
+                    f"Cliente registrado correctamente{detalle_id}.",
+                    parent=self,
+                )
         except Exception as exc:
             messagebox.showerror(
                 "Error al guardar cliente",
-                str(exc),
-                parent=self,
-            )
-
-    def actualizar_cliente(self) -> None:
-        """Actualiza los datos del cliente seleccionado en la tabla."""
-        if not self.puede_editar_clientes:
-            messagebox.showwarning(
-                "Acceso restringido",
-                "Su rol solo permite consultar y seleccionar clientes.",
-                parent=self,
-            )
-            return
-
-        if self.cliente_seleccionado_id is None:
-            messagebox.showwarning(
-                "Sin selección",
-                "Seleccioná un cliente del padrón para actualizar.",
-                parent=self,
-            )
-            return
-
-        cliente = self._construir_entidad_cliente(
-            id_cliente=self.cliente_seleccionado_id,
-            id_persona=self.persona_seleccionada_id,
-            activo=self.cliente_estado_activo,
-        )
-        if cliente is None:
-            return
-
-        try:
-            RepositorioVentas.guardar_cliente(cliente)
-            self.limpiar_formulario()
-            self.cargar_tabla_clientes()
-            messagebox.showinfo(
-                "Actualizado",
-                "Cliente actualizado correctamente.",
-                parent=self,
-            )
-        except Exception as exc:
-            messagebox.showerror(
-                "Error al actualizar cliente",
                 str(exc),
                 parent=self,
             )
@@ -621,9 +593,13 @@ class InterfazClientes(ttk.Frame):
 
         nuevo_estado = not self.cliente_estado_activo
         accion = "reactivar" if nuevo_estado else "deshabilitar"
+        nombre_ref = (
+            f"{self.var_apellidos.get().strip()}, {self.var_nombres.get().strip()}".strip(", ")
+            or f"ID #{self.cliente_seleccionado_id}"
+        )
         if not messagebox.askyesno(
             "Confirmar cambio de estado",
-            f"¿Deseás {accion} al cliente '{self.var_apellidos.get().strip()}, {self.var_nombres.get().strip()}'?",
+            f"¿Deseás {accion} al cliente '{nombre_ref}'?",
             parent=self,
         ):
             return
@@ -634,6 +610,11 @@ class InterfazClientes(ttk.Frame):
             )
             self.limpiar_formulario()
             self.cargar_tabla_clientes()
+            messagebox.showinfo(
+                "Estado actualizado",
+                f"Cliente {'reactivado' if nuevo_estado else 'deshabilitado'} correctamente.",
+                parent=self,
+            )
         except Exception as exc:
             messagebox.showerror(
                 "Error al actualizar estado",

@@ -5,7 +5,7 @@ MÓDULO DE VISTAS: PROVEEDORES (vistas/ui_proveedores.py)
 Alta, Listado, Edición y Baja/Reactivación Lógica de proveedores
 (Persona Jurídica, CUIT prefijo 30, rubro, contacto, teléfono, email y
 domicilio), usando la denominación unificada "Proveedores".
-Incluye control RBAC para operacines de escritura y cambio de estado.
+Incluye control RBAC para operaciones de escritura y cambio de estado.
 ===============================================================================
 """
 
@@ -130,7 +130,8 @@ class InterfazProveedores(ttk.Frame):
         estado_escritura = "normal" if self.puede_gestionar_proveedores else "disabled"
         self.btn_guardar.config(state=estado_escritura)
         if not self.puede_gestionar_proveedores:
-            self.btn_actualizar.config(state="disabled")
+            self.btn_toggle_estado.config(state="disabled")
+        elif self.proveedor_seleccionado_id is None:
             self.btn_toggle_estado.config(state="disabled")
 
     def _configurar_fuentes(self) -> None:
@@ -277,14 +278,6 @@ class InterfazProveedores(ttk.Frame):
         )
         self.btn_guardar.pack(side="left", padx=4)
 
-        self.btn_actualizar = ttk.Button(
-            frame_botones,
-            text="Actualizar",
-            command=self.actualizar_proveedor,
-            state="disabled",
-        )
-        self.btn_actualizar.pack(side="left", padx=4)
-
         ttk.Button(
             frame_botones,
             text="Limpiar",
@@ -302,7 +295,7 @@ class InterfazProveedores(ttk.Frame):
         # 2. Tabla inferior apilada: Proveedores
         frame_tabla = ttk.LabelFrame(
             self,
-            text=" Proveedores (Seleccione una fila para actualizar o deshabilitar) ",
+            text=" Proveedores (Seleccione una fila para editar o cambiar estado) ",
             padding=15,
         )
         frame_tabla.pack(fill="both", expand=True, padx=5, pady=5)
@@ -446,19 +439,20 @@ class InterfazProveedores(ttk.Frame):
         )
 
     def guardar_proveedor(self) -> None:
-        """Registra un nuevo proveedor y actualiza el listado."""
+        """Registra un nuevo proveedor o actualiza el seleccionado y refresca la tabla."""
         if not self.puede_gestionar_proveedores:
             messagebox.showwarning(
                 "Acceso restringido",
-                "Tu rol actual no tiene permisos para registrar proveedores.",
+                "Tu rol actual no tiene permisos para registrar o modificar proveedores.",
                 parent=self,
             )
             return
 
+        es_edicion = self.proveedor_seleccionado_id is not None
         prov = self._construir_entidad_proveedor(
-            id_proveedor=None,
-            id_persona=None,
-            activo=True,
+            id_proveedor=self.proveedor_seleccionado_id,
+            id_persona=self.persona_seleccionada_id,
+            activo=self.proveedor_activo if es_edicion else True,
         )
         try:
             RepositorioProveedores.guardar_proveedor(prov)
@@ -466,49 +460,14 @@ class InterfazProveedores(ttk.Frame):
             self.cargar_tabla_proveedores()
             messagebox.showinfo(
                 "Guardado",
-                "Proveedor registrado correctamente.",
+                "Proveedor actualizado correctamente."
+                if es_edicion
+                else "Proveedor registrado correctamente.",
                 parent=self,
             )
         except Exception as exc:
             messagebox.showerror(
                 "Error al guardar proveedor", str(exc), parent=self
-            )
-
-    def actualizar_proveedor(self) -> None:
-        """Actualiza los datos del proveedor seleccionado."""
-        if not self.puede_gestionar_proveedores:
-            messagebox.showwarning(
-                "Acceso restringido",
-                "Tu rol actual no tiene permisos para actualizar proveedores.",
-                parent=self,
-            )
-            return
-
-        if self.proveedor_seleccionado_id is None:
-            messagebox.showwarning(
-                "Sin selección",
-                "Seleccioná un proveedor para actualizar.",
-                parent=self,
-            )
-            return
-
-        prov = self._construir_entidad_proveedor(
-            id_proveedor=self.proveedor_seleccionado_id,
-            id_persona=self.persona_seleccionada_id,
-            activo=self.proveedor_activo,
-        )
-        try:
-            RepositorioProveedores.guardar_proveedor(prov)
-            self.limpiar_formulario()
-            self.cargar_tabla_proveedores()
-            messagebox.showinfo(
-                "Actualizado",
-                "Proveedor actualizado correctamente.",
-                parent=self,
-            )
-        except Exception as exc:
-            messagebox.showerror(
-                "Error al actualizar proveedor", str(exc), parent=self
             )
 
     def toggle_estado_proveedor(self) -> None:
@@ -560,7 +519,6 @@ class InterfazProveedores(ttk.Frame):
         self.btn_guardar.config(
             state="normal" if self.puede_gestionar_proveedores else "disabled"
         )
-        self.btn_actualizar.config(state="disabled")
         self.btn_toggle_estado.config(text="Deshabilitar", state="disabled")
         if self.tabla.selection():
             self.tabla.selection_remove(self.tabla.selection())
@@ -595,7 +553,6 @@ class InterfazProveedores(ttk.Frame):
         self.var_domicilio.set(str(getattr(prov, "domicilio", "") or ""))
 
         estado_btn = "normal" if self.puede_gestionar_proveedores else "disabled"
-        self.btn_actualizar.config(state=estado_btn)
         self.btn_toggle_estado.config(
             state=estado_btn,
             text="Reactivar" if not self.proveedor_activo else "Deshabilitar",

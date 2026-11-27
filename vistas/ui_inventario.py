@@ -6,7 +6,7 @@ Permite administrar el inventario de productos, actualizar existencias/datos,
 ajustar stock, visualizar alertas de reposición y emitir órdenes de compra
 cuando un producto está en o por debajo de su stock mínimo.
 - Patrón visual apilado: formulario arriba, tabla abajo.
-- Botonera estándar: Guardar, Actualizar, Limpiar, Deshabilitar + Emitir OC.
+- Botonera principal: Guardar, Limpiar, Deshabilitar + Emitir OC.
 - Control RBAC para operaciones de alta, actualización, emisión y estado.
 - Tipografía 12 pt sin itálicas (slant='roman').
 ===============================================================================
@@ -166,7 +166,8 @@ class InterfazInventario(ttk.Frame):
         self.btn_guardar.config(state=estado_escritura)
         self.btn_emitir_oc.config(state=estado_escritura)
         if not self.puede_gestionar_inventario:
-            self.btn_actualizar.config(state="disabled")
+            self.btn_toggle_estado.config(state="disabled")
+        elif self.producto_seleccionado_id is None:
             self.btn_toggle_estado.config(state="disabled")
 
     def _configurar_fuentes(self) -> None:
@@ -325,14 +326,6 @@ class InterfazInventario(ttk.Frame):
         )
         self.btn_guardar.pack(side="left", padx=4)
 
-        self.btn_actualizar = ttk.Button(
-            frame_izq,
-            text="Actualizar",
-            command=self.actualizar_producto,
-            state="disabled",
-        )
-        self.btn_actualizar.pack(side="left", padx=4)
-
         ttk.Button(
             frame_izq,
             text="Limpiar",
@@ -357,7 +350,7 @@ class InterfazInventario(ttk.Frame):
         # 2. Tabla inferior apilada: Catálogo de Productos
         frame_tabla = ttk.LabelFrame(
             self,
-            text=" Catálogo de Productos y Stock (Seleccione una fila para actualizar o emitir OC) ",
+            text=" Catálogo de Productos y Stock (Seleccione una fila para editar o emitir OC) ",
             padding=15,
         )
         frame_tabla.pack(fill="both", expand=True, padx=5, pady=5)
@@ -828,68 +821,46 @@ class InterfazInventario(ttk.Frame):
         )
 
     def guardar_producto(self) -> None:
-        """Registra un nuevo producto en el inventario."""
+        """Crea o actualiza un producto y refresca la tabla."""
         if not self.puede_gestionar_inventario:
             messagebox.showwarning(
                 "Acceso restringido",
-                "Tu rol actual no tiene permisos para registrar productos.",
+                "Tu rol actual no tiene permisos para registrar o modificar productos.",
                 parent=self,
             )
             return
 
+        es_edicion = self.producto_seleccionado_id is not None
         prod = self._construir_producto_desde_formulario(
-            id_producto=None, activo=True
+            id_producto=self.producto_seleccionado_id,
+            activo=self.producto_activo if es_edicion else True,
         )
         if prod is None:
             return
 
         try:
-            self.repo.guardar_producto(prod)
+            if es_edicion and hasattr(self.repo, "actualizar_producto"):
+                self.repo.actualizar_producto(prod)
+            elif hasattr(self.repo, "guardar_producto"):
+                self.repo.guardar_producto(prod)
+            elif hasattr(self.repo, "crear_producto"):
+                self.repo.crear_producto(prod)
+            else:
+                raise AttributeError(
+                    "RepositorioStock no implementa un método de guardado."
+                )
+
+            msg = (
+                "Producto y stock actualizados correctamente."
+                if es_edicion
+                else "Producto registrado correctamente."
+            )
             self.limpiar_formulario()
             self.cargar_datos()
-            self._notificar_orden_compra_si_corresponde(
-                prod, "Producto registrado correctamente."
-            )
+            self._notificar_orden_compra_si_corresponde(prod, msg)
         except Exception as exc:
             messagebox.showerror(
                 "Error al guardar producto", str(exc), parent=self
-            )
-
-    def actualizar_producto(self) -> None:
-        """Actualiza el producto seleccionado en la tabla conservando su ID."""
-        if not self.puede_gestionar_inventario:
-            messagebox.showwarning(
-                "Acceso restringido",
-                "Tu rol actual no tiene permisos para actualizar productos.",
-                parent=self,
-            )
-            return
-
-        if self.producto_seleccionado_id is None:
-            messagebox.showwarning(
-                "Sin selección",
-                "Seleccioná un producto de la tabla para actualizar.",
-                parent=self,
-            )
-            return
-
-        prod = self._construir_producto_desde_formulario(
-            id_producto=self.producto_seleccionado_id,
-            activo=self.producto_activo,
-        )
-        if prod is None:
-            return
-
-        try:
-            self.repo.guardar_producto(prod)
-            self.limpiar_formulario()
-            self.cargar_datos()
-            self._notificar_orden_compra_si_corresponde(
-                prod, "Producto y stock actualizados correctamente."
-            )
-        except Exception as exc:
-            messagebox.showerror(
-                "Error al actualizar producto", str(exc), parent=self
             )
 
     def toggle_estado_producto(self) -> None:
@@ -915,9 +886,17 @@ class InterfazInventario(ttk.Frame):
             return
 
         try:
-            self.repo.cambiar_estado_producto(
-                self.producto_seleccionado_id, nuevo_estado
-            )
+            if hasattr(self.repo, "cambiar_estado_producto"):
+                self.repo.cambiar_estado_producto(
+                    self.producto_seleccionado_id, nuevo_estado
+                )
+            elif hasattr(self.repo, "guardar_producto"):
+                prod = self._construir_producto_desde_formulario(
+                    id_producto=self.producto_seleccionado_id,
+                    activo=nuevo_estado,
+                )
+                if prod is not None:
+                    self.repo.guardar_producto(prod)
             self.limpiar_formulario()
             self.cargar_datos()
         except Exception as exc:
@@ -942,13 +921,12 @@ class InterfazInventario(ttk.Frame):
         self.btn_guardar.config(
             state="normal" if self.puede_gestionar_inventario else "disabled"
         )
-        self.btn_actualizar.config(state="disabled")
         self.btn_toggle_estado.config(text="Deshabilitar", state="disabled")
         if self.tabla_prod.selection():
             self.tabla_prod.selection_remove(self.tabla_prod.selection())
 
     def _al_seleccionar_fila(self, _event: Any = None) -> None:
-        """Carga los datos de la fila seleccionada en el formulario para actualizar."""
+        """Carga los datos de la fila seleccionada en el formulario para editar."""
         seleccion = self.tabla_prod.selection()
         if not seleccion:
             return
@@ -981,7 +959,6 @@ class InterfazInventario(ttk.Frame):
                 break
 
         estado_btn = "normal" if self.puede_gestionar_inventario else "disabled"
-        self.btn_actualizar.config(state=estado_btn)
         self.btn_toggle_estado.config(
             state=estado_btn,
             text="Reactivar" if not self.producto_activo else "Deshabilitar",

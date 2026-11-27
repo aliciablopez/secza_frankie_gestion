@@ -315,11 +315,8 @@ class InterfazFacturacion(ttk.Frame):
             command=self.modificar_item_seleccionado,
         ).grid(row=0, column=1, padx=4)
         ttk.Button(
-            frame_acciones_item, text="Actualizar", command=self.actualizar_catalogos
-        ).grid(row=0, column=2, padx=4)
-        ttk.Button(
             frame_acciones_item, text="Quitar", command=self.quitar_item_seleccionado
-        ).grid(row=0, column=3, padx=(4, 0))
+        ).grid(row=0, column=2, padx=(4, 0))
 
         # 2. Detalle de productos
         frame_detalle = ttk.LabelFrame(
@@ -427,10 +424,7 @@ class InterfazFacturacion(ttk.Frame):
 
         ttk.Button(
             frame_botones_emision, text="Emitir factura", command=self.emitir_factura
-        ).grid(row=0, column=0, padx=(0, 6))
-        ttk.Button(
-            frame_botones_emision, text="Imprimir", command=self.abrir_ventana_impresion
-        ).grid(row=0, column=1)
+        ).grid(row=0, column=0)
 
     # =========================================================================
     # CARGA DE CATÁLOGOS
@@ -439,27 +433,6 @@ class InterfazFacturacion(ttk.Frame):
         self._cargar_clientes()
         self._cargar_vendedores()
         self._cargar_productos()
-
-    def actualizar_catalogos(self) -> None:
-        """Refresca clientes activos, vendedores con rol vendedor y productos."""
-        cliente_prev = self.var_cliente.get()
-        vendedor_prev = self.var_vendedor.get()
-        prod_prev = self.var_producto.get()
-
-        self._cargar_catalogos()
-
-        if cliente_prev in self.combo_cliente["values"]:
-            self.var_cliente.set(cliente_prev)
-        if vendedor_prev in self.combo_vendedor["values"]:
-            self.var_vendedor.set(vendedor_prev)
-        if prod_prev in self.combo_producto["values"]:
-            self.var_producto.set(prod_prev)
-
-        messagebox.showinfo(
-            "Catálogos actualizados",
-            "Se actualizaron clientes activos, vendedores y productos desde la base de datos.",
-            parent=self,
-        )
 
     def _cargar_clientes(self) -> None:
         self.clientes_disponibles = []
@@ -1092,19 +1065,4 @@ class InterfazFacturacion(ttk.Frame):
         self.items_actuales = []
         if limpiar_todo:
             self.ultima_factura_emitida = None
-            self.ultima_ruta_html = None
-        self.var_cantidad.set("1")
-        self._refrescar_tabla_detalles()
-        self._cargar_productos()
-
-
-if __name__ == "__main__":
-    raiz = tk.Tk()
-    raiz.title("Frankie Gestor - Facturación")
-    raiz.geometry("1040x700")
-    aplicar_estilos_base(raiz)
-    vista = InterfazFacturacion(raiz)
-    vista.grid(row=0, column=0, sticky="nsew")
-    raiz.columnconfigure(0, weight=1)
-    raiz.rowconfigure(0, weight=1)
-    raiz.mainloop()
+            self.ultima_ruta_html
